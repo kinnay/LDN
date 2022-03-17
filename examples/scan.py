@@ -34,12 +34,12 @@ async def main():
 		print()
 		print("\tParticipants:")
 		for i, participant in enumerate(network.participants):
-			if i != 0:
+			if participant.connected:
+				print("\t\tName: %s" %participant.name)
+				print("\t\tIP address: %s" %participant.ip_address)
+				print("\t\tMAC address: %s" %participant.mac_address)
+				print("\t\tApplication version: %i" %participant.app_version)
+				print("\t\tConnected: %s" %participant.connected)
 				print("\t\t---")
-			print("\t\tName: %s" %participant.name)
-			print("\t\tIP address: %s" %participant.ip_address)
-			print("\t\tMAC address: %s" %participant.mac_address)
-			print("\t\tApplication version: %i" %participant.app_version)
-			print("\t\tConnected: %s" %participant.connected)
 		
 trio.run(main)

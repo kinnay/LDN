@@ -2,6 +2,7 @@
 import contextlib
 import trio
 
+
 @contextlib.asynccontextmanager
 async def background_task(task, *args):
 	async with trio.open_nursery() as nursery:
