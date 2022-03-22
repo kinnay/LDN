@@ -1,7 +1,7 @@
 # LDN
 Python package for local wireless communication with a Nintendo Switch
 
-This package is able to scan for nearby LDN networks, join them, and host your own networks. To get started, check out the examples folder or documentation.
+This package is able to scan for nearby LDN networks, join them, and even host your own networks. To get started, check out the examples folder or documentation.
 
 This package can be installed with `pip install ldn`.
 

@@ -887,12 +887,13 @@ class STANetwork:
 		)
 		
 		# Create a static neighbor entry for each participant
-		for participant in frame.info.participants:
-			attrs = {
-				route.NDA_DST: socket.inet_aton(participant.ip_address),
-				route.NDA_LLADDR: participant.mac_address.encode()
-			}
-			await self.router.add_neighbor(socket.AF_INET, self.interface.index, route.NUD_PERMANENT, 0, 0, attrs)
+		for participant in network.participants:
+			if participant.connected:
+				attrs = {
+					route.NDA_DST: socket.inet_aton(participant.ip_address),
+					route.NDA_LLADDR: participant.mac_address.encode()
+				}
+				await self.router.add_neighbor(socket.AF_INET, self.interface.index, route.NUD_PERMANENT, 0, 0, attrs)
 	
 	async def monitor_network(self):
 		# Monitors advertisement frames to get
