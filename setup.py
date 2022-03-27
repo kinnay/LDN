@@ -21,5 +21,5 @@ setuptools.setup(
 	license = "GPLv3",
 	platforms = ["Linux"],
 	packages = ["ldn"],
-	install_requires = ["python-netlink"]
+	install_requires = ["python-netlink", "pycryptodome"]
 )
