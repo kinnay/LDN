@@ -1083,7 +1083,7 @@ class APNetwork:
 				response = await self.process_authentication_event(event)
 				await self.interface.send_frame(event.address, response.encode())
 			elif isinstance(event, wlan.DisassociationEvent):
-				await self.process_disassociation(event)
+				await self.process_disassociation(event.address)
 	
 	async def process_authentication_event(self, event):
 		frame = AuthenticationFrame()
