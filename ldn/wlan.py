@@ -556,9 +556,15 @@ class AssociationEvent:
 class DisassociationEvent:
 	def __init__(self, address):
 		self.address = address
-		
+
 
 class FrameEvent:
+	def __init__(self, frame, frequency):
+		self.frame = frame
+		self.frequency = frequency
+
+
+class DataFrameEvent:
 	def __init__(self, address, data):
 		self.address = address
 		self.data = data
@@ -650,7 +656,7 @@ class STAInterface:
 	async def next_event(self):
 		return await self.events.get()
 	
-	async def send_frame(self, addr, frame):
+	async def send_data_frame(self, addr, frame):
 		attrs = {
 			nl80211.NL80211_ATTR_IFINDEX: self.interface.index,
 			nl80211.NL80211_ATTR_FRAME: frame,
@@ -723,7 +729,6 @@ class STAInterface:
 					}
 				}
 				await self.wlan.request(nl80211.NL80211_CMD_NEW_KEY, attrs)
-			
 			yield
 		finally:
 			attrs = {nl80211.NL80211_ATTR_IFINDEX: self.interface.index}
@@ -734,21 +739,29 @@ class STAInterface:
 		self.interface.disable_ipv6()
 		async with self.connect_network() as addr:
 			async with util.background_task(self.process_messages):
-				attrs = {
-					nl80211.NL80211_ATTR_IFINDEX: self.interface.index,
-					nl80211.NL80211_ATTR_FRAME_TYPE: IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_ACTION,
-					nl80211.NL80211_ATTR_FRAME_MATCH: b""
-				}
-				await self.wlan.request(nl80211.NL80211_CMD_REGISTER_FRAME, attrs)
+				await self.register_frame(IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_ACTION)
 				yield
+	
+	async def register_frame(self, type, match=b""):
+		attrs = {
+			nl80211.NL80211_ATTR_IFINDEX: self.interface.index,
+			nl80211.NL80211_ATTR_FRAME_TYPE: type,
+			nl80211.NL80211_ATTR_FRAME_MATCH: match
+		}
+		await self.wlan.request(nl80211.NL80211_CMD_REGISTER_FRAME, attrs)
 	
 	async def process_messages(self):
 		while True:
 			message = await self.wlan.receive()
-			if message.type == nl80211.NL80211_CMD_CONTROL_PORT_FRAME:
+			if message.type == nl80211.NL80211_CMD_FRAME:
+				frame = ActionFrame()
+				frame.decode(message.attributes[nl80211.NL80211_ATTR_FRAME])
+				freq = message.attributes[nl80211.NL80211_ATTR_WIPHY_FREQ]
+				await self.events.put(FrameEvent(frame, freq))
+			elif message.type == nl80211.NL80211_CMD_CONTROL_PORT_FRAME:
 				address = MACAddress(message.attributes[nl80211.NL80211_ATTR_MAC])
 				data = message.attributes[nl80211.NL80211_ATTR_FRAME]
-				await self.events.put(FrameEvent(address, data))
+				await self.events.put(DataFrameEvent(address, data))
 			elif message.type == nl80211.NL80211_CMD_DEL_STATION:
 				address = MACAddress(message.attributes[nl80211.NL80211_ATTR_MAC])
 				await self.events.put(DisassociationEvent(None))
@@ -901,14 +914,6 @@ class APInterface:
 			attrs = {nl80211.NL80211_ATTR_IFINDEX: self.interface.index}
 			await self.wlan.request(nl80211.NL80211_CMD_STOP_AP, attrs)
 	
-	async def register_frame(self, type, match=b""):
-		attrs = {
-			nl80211.NL80211_ATTR_IFINDEX: self.interface.index,
-			nl80211.NL80211_ATTR_FRAME_TYPE: type,
-			nl80211.NL80211_ATTR_FRAME_MATCH: match
-		}
-		await self.wlan.request(nl80211.NL80211_CMD_REGISTER_FRAME, attrs)
-	
 	@contextlib.asynccontextmanager
 	async def start(self):
 		self.interface.disable_ipv6()
@@ -920,6 +925,14 @@ class APInterface:
 			
 			async with util.background_task(self.process_messages):
 				yield
+	
+	async def register_frame(self, type, match=b""):
+		attrs = {
+			nl80211.NL80211_ATTR_IFINDEX: self.interface.index,
+			nl80211.NL80211_ATTR_FRAME_TYPE: type,
+			nl80211.NL80211_ATTR_FRAME_MATCH: match
+		}
+		await self.wlan.request(nl80211.NL80211_CMD_REGISTER_FRAME, attrs)
 	
 	async def process_messages(self):
 		while True:
@@ -934,14 +947,14 @@ class APInterface:
 			elif message.type == nl80211.NL80211_CMD_CONTROL_PORT_FRAME:
 				address = MACAddress(message.attributes[nl80211.NL80211_ATTR_MAC])
 				data = message.attributes[nl80211.NL80211_ATTR_FRAME]
-				await self.events.put(FrameEvent(address, data))
+				await self.events.put(DataFrameEvent(address, data))
 	
 	async def process_frame(self, frame):
 		if isinstance(frame, ProbeRequest):
 			ssid = frame.elements.get(WLAN_EID_SSID)
 			if ssid == self.ssid.encode():
 				response = self.create_probe_response(frame.source)
-				await self.send_management_frame(response)
+				await self.send_frame(response)
 		elif isinstance(frame, AuthenticationFrame):
 			if frame.bssid == self.interface.address:
 				if frame.algorithm == WLAN_AUTH_OPEN and frame.sequence == 1:
@@ -952,12 +965,12 @@ class APInterface:
 					response.algorithm = WLAN_AUTH_OPEN
 					response.sequence = 2
 					response.status_code = WLAN_STATUS_SUCCESS
-					await self.send_management_frame(response.encode())
+					await self.send_frame(response.encode())
 		elif isinstance(frame, AssociationRequest):
 			ssid = frame.elements.get(WLAN_EID_SSID)
 			if ssid == self.ssid.encode():
 				response = await self.process_association_request(frame)
-				await self.send_management_frame(response)
+				await self.send_frame(response)
 		elif isinstance(frame, DisassociationFrame):
 			await self.process_disassociation(frame)
 	
@@ -1027,14 +1040,14 @@ class APInterface:
 		
 		await self.events.put(DisassociationEvent(frame.source))
 	
-	async def send_management_frame(self, data):
+	async def send_frame(self, data):
 		attrs = {
 			nl80211.NL80211_ATTR_IFINDEX: self.interface.index,
 			nl80211.NL80211_ATTR_FRAME: data
 		}
 		await self.wlan.request(nl80211.NL80211_CMD_FRAME, attrs)
 	
-	async def send_frame(self, addr, frame):
+	async def send_data_frame(self, addr, frame):
 		attrs = {
 			nl80211.NL80211_ATTR_IFINDEX: self.interface.index,
 			nl80211.NL80211_ATTR_FRAME: frame,

@@ -105,12 +105,8 @@ Implements the local wireless protocol used by the Nintendo Switch.
 
 `ifname: str = "ldn"`<br>
 <span class="docs">The interface name for the station. The interface names must not already be in use.</span><br>
-`ifname_monitor: str = "ldn-mon"`<br>
-<span class="docs">The interface name for the monitor. The interface names must not already be in use.</span><br>
 `phyname: str = "phy0"`<br>
 <span class="docs">The name of the wiphy on which the station interface is created.</span><br>
-`phyname_monitor: str = "phy0"`<br>
-<span class="docs">The name of the wiphy on which the monitor interface is created.</span>
 
 <code>network: [NetworkInfo](#networkinfo)</code><br>
 <span class="docs">The network information obtained during scanning.</span><br>

@@ -12,7 +12,7 @@ long_description = \
 
 setuptools.setup(
 	name = "ldn",
-	version = "0.0.6",
+	version = "0.0.7",
 	description = description,
 	long_description = long_description,
 	author = "Yannik Marchand",

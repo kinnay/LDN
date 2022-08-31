@@ -557,6 +557,9 @@ class NetworkInfo:
 		self.nonce = None
 	
 	def check(self, info):
+		if self.address != info.address: return False
+		if self.channel != info.channel: return False
+		
 		if info.local_communication_id != self.local_communication_id: return False
 		if info.game_mode != self.game_mode: return False
 		if info.ssid != self.ssid: return False
@@ -607,9 +610,7 @@ class NetworkInfo:
 class ConnectNetworkParam:
 	def __init__(self):
 		self.ifname = "ldn"
-		self.ifname_monitor = "ldn-mon"
 		self.phyname = "phy0"
-		self.phyname_monitor = "phy0"
 		
 		self.network = None
 		self.password = ""
@@ -617,7 +618,6 @@ class ConnectNetworkParam:
 		self.name = ""
 		self.app_version = 0
 		
-		self.version = 3
 		self.enable_challenge = True
 		self.device_id = random.randint(0, 0xFFFFFFFFFFFFFFFF)
 
@@ -651,7 +651,6 @@ class CreateNetworkParam:
 		self.key = None
 		self.password = ""
 		
-		self.version = 3
 		self.enable_challenge = True
 		self.device_id = random.randint(0, 0xFFFFFFFFFFFFFFFF)
 
@@ -725,8 +724,6 @@ class AdvertisementMonitor:
 			except Exception:
 				continue # Skip invalid frames
 			
-			channel = wlan.map_frequency(radiotap.frequency)
-			
 			info = NetworkInfo()
 			info.address = action.source
 			info.channel = wlan.map_frequency(radiotap.frequency)
@@ -751,8 +748,7 @@ class AdvertisementMonitor:
 
 		
 class STANetwork:
-	def __init__(self, interface, monitor, router, param):
-		self.monitor = AdvertisementMonitor(monitor)
+	def __init__(self, interface, router, param):
 		self.interface = interface
 		self.router = router
 		
@@ -764,6 +760,7 @@ class STANetwork:
 		self.network_id = None
 		
 		self.events = queue.create()
+		self.advertisements = queue.create()
 	
 	def check_authentication_response(self, address, data):
 		if address != self.network.address: return False
@@ -796,8 +793,8 @@ class STANetwork:
 	@contextlib.asynccontextmanager
 	async def start(self):
 		await self.authenticate()
-		await self.initialize_network()
 		async with util.background_task(self.process_events):
+			await self.initialize_network()
 			async with util.background_task(self.monitor_network):
 				yield
 	
@@ -805,6 +802,22 @@ class STANetwork:
 		while True:
 			event = await self.interface.next_event()
 			if isinstance(event, wlan.FrameEvent):
+				if event.frame.source != self.network.address:
+					continue # Only process frames from the host
+				
+				frame = AdvertisementFrame()
+				try: frame.decode(event.frame.action)
+				except Exception:
+					continue # Skip invalid frames
+				
+				info = NetworkInfo()
+				info.address = event.frame.source
+				info.channel = wlan.map_frequency(event.frequency)
+				info.parse(frame)
+				if not self.network.check(info):
+					raise ConnectionError("Received incompatible advertisement frame from host")
+				await self.advertisements.put(info)
+			elif isinstance(event, wlan.DataFrameEvent):
 				frame = DisconnectFrame()
 				frame.decode(event.data)
 				await self.events.put(DisconnectEvent(frame.reason))
@@ -838,39 +851,37 @@ class STANetwork:
 		
 		# Attempt authentication up to three times
 		for i in range(3):
-			await self.interface.send_frame(self.network.address, frame.encode())
+			await self.interface.send_data_frame(self.network.address, frame.encode())
 			
 			# Resend the authentication request if we do not
 			# receive a response after 700 milliseconds
 			with trio.move_on_after(.7):
 				while True:
 					event = await self.interface.next_event()
-					if isinstance(event, wlan.FrameEvent):
+					if isinstance(event, wlan.DataFrameEvent):
 						if self.check_authentication_response(event.address, event.data):
 							return
 					elif isinstance(event, wlan.DisassociationEvent):
 						raise ConnectionError("Station was disassociated")
 		raise ConnectionError("Authentication timeout (password may be wrong)")
 	
-	async def receive_network(self):
-		# Receives the next advertisement frame
+	async def wait_for_network(self):
 		while True:
-			info = await self.monitor.receive()
-			if info.address == self.network.address and info.channel == self.network.channel:
-				if not self.network.check(info):
-					raise ConnectionError("Received incompatible advertisement frame from host")
-				return info
+			network = await self.advertisements.get()
+			for index, participant in enumerate(network.participants):
+				if participant.mac_address == self.interface.address:
+					return network, index
 	
 	async def initialize_network(self):
 		await self.interface.set_authorized()
 		
 		# Wait until the host has updated the advertisement frame
-		with trio.fail_after(1):
-			while True:
-				network = await self.receive_network()
-				for index, participant in enumerate(network.participants):
-					if participant.mac_address == self.interface.address:
-						break
+		network = None
+		with trio.move_on_after(1):
+			network, index = await self.wait_for_network()
+		
+		if network is None:
+			raise ConnectionError("Failed to obtain IP address after joining network (timeout)")
 		
 		# Initialize local state
 		self.network = network
@@ -899,7 +910,7 @@ class STANetwork:
 		# Monitors advertisement frames to get
 		# notified when the network changes
 		while True:
-			network = await self.receive_network()
+			network = await self.advertisements.get()
 			
 			# Check if the accept policy has changed
 			if network.accept_policy != self.network.accept_policy:
@@ -1061,7 +1072,7 @@ class APNetwork:
 		if participant.connected:
 			frame = DisconnectFrame()
 			frame.reason = DISCONNECT_STATION_REJECTED_BY_HOST
-			await self.interface.send_frame(participant.mac_address, frame.encode())
+			await self.interface.send_data_frame(participant.mac_address, frame.encode())
 			await self.interface.remove_station(participant.mac_address)
 			await self.process_disassociation(participant.mac_address)
 	
@@ -1079,9 +1090,9 @@ class APNetwork:
 	async def process_events(self):
 		while True:
 			event = await self.interface.next_event()
-			if isinstance(event, wlan.FrameEvent):
+			if isinstance(event, wlan.DataFrameEvent):
 				response = await self.process_authentication_event(event)
-				await self.interface.send_frame(event.address, response.encode())
+				await self.interface.send_data_frame(event.address, response.encode())
 			elif isinstance(event, wlan.DisassociationEvent):
 				await self.process_disassociation(event.address)
 	
@@ -1177,7 +1188,7 @@ class APNetwork:
 			if participant.connected:
 				frame = DisconnectFrame()
 				frame.reason = DISCONNECT_NETWORK_DESTROYED
-				await self.interface.send_frame(participant.mac_address, frame.encode())
+				await self.interface.send_data_frame(participant.mac_address, frame.encode())
 
 
 async def scan(ifname="ldn", phyname="phy0", channels=[1, 6, 11], dwell_time=.110):
@@ -1194,7 +1205,7 @@ async def scan(ifname="ldn", phyname="phy0", channels=[1, 6, 11], dwell_time=.11
 			return await scanner.scan(channels, dwell_time)
 
 @contextlib.asynccontextmanager
-async def connect(param, ifname="ldn", phyname="phy0"):
+async def connect(param):
 	param = copy.copy(param)
 	param.check()
 	
@@ -1205,16 +1216,14 @@ async def connect(param, ifname="ldn", phyname="phy0"):
 		key = generate_data_key(network.key, param.password)
 	
 	async with wlan.create() as factory:
-		async with factory.create_monitor(param.phyname_monitor, param.ifname_monitor) as monitor:
-			await monitor.set_channel(network.channel)
-			async with factory.connect_network(param.phyname, param.ifname, network.ssid.hex(), network.channel, key) as interface:
-				async with route.connect() as router:
-					network = STANetwork(interface, monitor, router, param)
-					async with network.start():
-						yield network
+		async with factory.connect_network(param.phyname, param.ifname, network.ssid.hex(), network.channel, key) as interface:
+			async with route.connect() as router:
+				network = STANetwork(interface, router, param)
+				async with network.start():
+					yield network
 
 @contextlib.asynccontextmanager
-async def create_network(param, ifname="ldn", phyname="phy0"):
+async def create_network(param):
 	param = copy.copy(param)
 	if param.ssid is None: param.ssid = secrets.token_bytes(16)
 	if param.channel is None: param.channel = random.choice([1, 6, 11])
