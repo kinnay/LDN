@@ -84,7 +84,7 @@ Implements the local wireless protocol used by the Nintendo Switch.
 <span class="docs">LDN version used by the host.</span><br>
 `key: bytes`<br>
 <span class="docs">Network key. This is used to generate encryption keys.</span><br>
-`security_level: bytes`<br>
+`security_level: int`<br>
 <span class="docs">The security level of the network.</span>
 
 ## ParticipantInfo
