@@ -624,10 +624,14 @@ class Monitor:
 		await self.socket.bind((self.interface.name, 0))
 	
 	async def recv(self):
-		data = await self.socket.recv(4096)
-		radiotap = RadiotapFrame()
-		radiotap.decode(data)
-		return radiotap
+		while True:
+			data = await self.socket.recv(4096)
+			radiotap = RadiotapFrame()
+			try:
+				radiotap.decode(data)
+				return radiotap
+			except Exception as e:
+				pass # Ignore invalid frames
 	
 	async def send(self, frame):
 		await self.socket.send(frame.encode())
