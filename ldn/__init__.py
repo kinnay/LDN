@@ -651,6 +651,7 @@ class CreateNetworkParam:
 		self.key = None
 		self.password = ""
 		
+		self.version = 3
 		self.enable_challenge = True
 		self.device_id = random.randint(0, 0xFFFFFFFFFFFFFFFF)
 
