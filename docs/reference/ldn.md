@@ -50,6 +50,9 @@ Implements the local wireless protocol used by the Nintendo Switch.
 <code>**def \_\_hash__**() -> int</code><br>
 <span class="docs">Returns a hash so that the MAC address can be used in sets and as dictionary keys.</span>
 
+<code>**def \_\_bytes__**() -> bytes</code><br>
+<span class="docs">Returns a bytes representation of the MAC address: `\x12\x34\x56\x78\x9a\xbc`.</span>
+
 <code>**def \_\_str__**() -> str</code><br>
 <span class="docs">Returns a string representation of the MAC address: `12:34:56:78:9a:bc`.</span>
 

@@ -122,6 +122,9 @@ class MACAddress:
 	def __hash__(self):
 		return hash(str(self))
 	
+	def __bytes__(self):
+		return bytes(self.fields)
+
 	def __str__(self):
 		return ":".join("%02x" %value for value in self.fields)
 	def __repr__(self):
