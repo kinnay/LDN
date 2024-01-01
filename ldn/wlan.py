@@ -1063,6 +1063,15 @@ class APInterface:
 		}
 		await self.wlan.request(nl80211.NL80211_CMD_CONTROL_PORT_FRAME, attrs)
 	
+	async def set_authorized(self, addr):
+		flag = 1 << nl80211.NL80211_STA_FLAG_AUTHORIZED
+		attrs = {
+			nl80211.NL80211_ATTR_IFINDEX: self.interface.index,
+			nl80211.NL80211_ATTR_MAC: addr.encode(),
+			nl80211.NL80211_ATTR_STA_FLAGS2: struct.pack("II", flag, flag)
+		}
+		await self.wlan.request(nl80211.NL80211_CMD_SET_STATION, attrs)
+	
 	async def remove_station(self, addr):
 		if addr not in self.stations_by_address: return
 		

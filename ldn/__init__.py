@@ -1140,6 +1140,8 @@ class APNetwork:
 		
 		self.network.participants[index] = participant
 		self.update_nonce()
+
+		await self.interface.set_authorized(address)
 		
 		# Add neighbor entry
 		attrs = {
