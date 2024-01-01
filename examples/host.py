@@ -58,7 +58,7 @@ async def main():
 	param.max_participants = 4
 	param.application_data = make_application_data()
 	param.name = NICKNAME
-	param.app_version = 5
+	param.app_version = 6
 	param.password = "LunchPack2DefaultPhrase"
 	async with ldn.create_network(param) as network:
 		print("Listening for events.")
