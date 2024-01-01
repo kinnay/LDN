@@ -759,6 +759,7 @@ class STANetwork:
 		self.authentication_key = secrets.token_bytes(16)
 		
 		self.network_id = None
+		self.participant_id = None
 		
 		self.events = queue.create()
 		self.advertisements = queue.create()
@@ -787,6 +788,9 @@ class STANetwork:
 	
 	def info(self):
 		return self.network
+	
+	def participant(self):
+		return self.network.participants[self.participant_id]
 	
 	async def next_event(self):
 		return await self.events.get()
@@ -887,6 +891,7 @@ class STANetwork:
 		# Initialize local state
 		self.network = network
 		self.network_id = int(network.participants[0].ip_address.split(".")[2])
+		self.participant_id = index
 		
 		# Initialize interface address
 		attrs = {
@@ -1056,6 +1061,9 @@ class APNetwork:
 	
 	def info(self):
 		return self.network
+	
+	def participant(self):
+		return self.network.participants[0]
 	
 	def set_application_data(self, data):
 		self.network.application_data = data

@@ -180,12 +180,18 @@ Implements the local wireless protocol used by the Nintendo Switch.
 <code>**def info**() -> [NetworkInfo](#networkinfo)</code><br>
 <span class="docs">Returns information about the network.</span>
 
+<code>**def participant**() -> [ParticipantInfo](#participantinfo)</code><br>
+<span class="docs">Returns information about the local participant.</span>
+
 <code>**async def next_event**() -> object</code><br>
 <span class="docs">Waits until an event occurs and returns it. Returns [JoinEvent](#Joinevent), [LeaveEvent](#leaveevent), [DisconnectEvent](#disconnected), [ApplicationDataChanged](#applicationdatachanged) or [AcceptPolicyChanged](#acceptpolicychanged).</span>
 
 ## APNetwork
 <code>**def info**() -> [NetworkInfo](#networkinfo)</code><br>
 <span class="docs">Returns information about the network.</span>
+
+<code>**def participant**() -> [ParticipantInfo](#participantinfo)</code><br>
+<span class="docs">Returns information about the local participant.</span>
 
 <code>**def set_application_data**(data: bytes) -> None</code><br>
 <span class="docs">Updates the application data.</span>
