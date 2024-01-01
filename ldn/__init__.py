@@ -1186,6 +1186,16 @@ class APNetwork:
 	
 	async def initialize_network(self):
 		host = self.network.participants[0]
+
+		attrs = {
+			route.IFA_LOCAL: socket.inet_aton(host.ip_address),
+			route.IFA_BROADCAST: socket.inet_aton("169.254.%i.255" %self.network_id)
+		}
+		await self.router.add_address(
+			socket.AF_INET, 24, route.IFA_F_PERMANENT, route.RT_SCOPE_UNIVERSE,
+			self.interface.index, attrs
+		)
+
 		attrs = {
 			route.NDA_DST: socket.inet_aton(host.ip_address),
 			route.NDA_LLADDR: host.mac_address.encode()
