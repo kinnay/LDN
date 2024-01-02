@@ -672,6 +672,28 @@ class STAInterface:
 		}
 		await self.wlan.request(nl80211.NL80211_CMD_CONTROL_PORT_FRAME, attrs)
 	
+	async def register_keys(self):
+		attrs = {
+			nl80211.NL80211_ATTR_IFINDEX: self.interface.index,
+			nl80211.NL80211_ATTR_MAC: self.host_address,
+			nl80211.NL80211_ATTR_KEY: {
+				nl80211.NL80211_KEY_IDX: 0,
+				nl80211.NL80211_KEY_DATA: self.key,
+				nl80211.NL80211_KEY_CIPHER: WLAN_CIPHER_SUITE_CCMP
+			}
+		}
+		await self.wlan.request(nl80211.NL80211_CMD_NEW_KEY, attrs)
+		
+		attrs = {
+			nl80211.NL80211_ATTR_IFINDEX: self.interface.index,
+			nl80211.NL80211_ATTR_KEY: {
+				nl80211.NL80211_KEY_IDX: 1,
+				nl80211.NL80211_KEY_DATA: self.key,
+				nl80211.NL80211_KEY_CIPHER: WLAN_CIPHER_SUITE_CCMP
+			}
+		}
+		await self.wlan.request(nl80211.NL80211_CMD_NEW_KEY, attrs)
+
 	@contextlib.asynccontextmanager
 	async def connect_network(self):
 		rsn = RSNElement()
@@ -712,30 +734,8 @@ class STAInterface:
 		
 		try:
 			self.host_address = message.attributes[nl80211.NL80211_ATTR_MAC]
-			
 			if self.key is not None:
-				attrs = {
-					nl80211.NL80211_ATTR_IFINDEX: self.interface.index,
-					nl80211.NL80211_ATTR_MAC: self.host_address,
-					nl80211.NL80211_ATTR_KEY: {
-						nl80211.NL80211_KEY_IDX: 0,
-						nl80211.NL80211_KEY_DATA: self.key,
-						nl80211.NL80211_KEY_CIPHER: WLAN_CIPHER_SUITE_CCMP,
-						nl80211.NL80211_KEY_DEFAULT: True
-					}
-				}
-				await self.wlan.request(nl80211.NL80211_CMD_NEW_KEY, attrs)
-				
-				attrs = {
-					nl80211.NL80211_ATTR_IFINDEX: self.interface.index,
-					nl80211.NL80211_ATTR_KEY: {
-						nl80211.NL80211_KEY_IDX: 1,
-						nl80211.NL80211_KEY_DATA: self.key,
-						nl80211.NL80211_KEY_CIPHER: WLAN_CIPHER_SUITE_CCMP,
-						nl80211.NL80211_KEY_DEFAULT: True
-					}
-				}
-				await self.wlan.request(nl80211.NL80211_CMD_NEW_KEY, attrs)
+				await self.register_keys()
 			yield
 		finally:
 			attrs = {nl80211.NL80211_ATTR_IFINDEX: self.interface.index}
@@ -909,11 +909,22 @@ class APInterface:
 				nl80211.NL80211_ATTR_KEY: {
 					nl80211.NL80211_KEY_IDX: 1,
 					nl80211.NL80211_KEY_DATA: self.key,
-					nl80211.NL80211_KEY_CIPHER: WLAN_CIPHER_SUITE_CCMP,
-					nl80211.NL80211_KEY_DEFAULT: True
+					nl80211.NL80211_KEY_CIPHER: WLAN_CIPHER_SUITE_CCMP
 				}
 			}
 			await self.wlan.request(nl80211.NL80211_CMD_NEW_KEY, attrs)
+
+			attrs = {
+				nl80211.NL80211_ATTR_IFINDEX: self.interface.index,
+				nl80211.NL80211_ATTR_KEY: {
+					nl80211.NL80211_KEY_IDX: 1,
+					nl80211.NL80211_KEY_DEFAULT: True,
+					nl80211.NL80211_KEY_DEFAULT_TYPES: {
+						nl80211.NL80211_KEY_DEFAULT_TYPE_MULTICAST: True
+					}
+				}
+			}
+			await self.wlan.request(nl80211.NL80211_CMD_SET_KEY, attrs)
 		
 		try:
 			yield
@@ -1022,8 +1033,7 @@ class APInterface:
 				nl80211.NL80211_ATTR_KEY: {
 					nl80211.NL80211_KEY_IDX: 0,
 					nl80211.NL80211_KEY_DATA: self.key,
-					nl80211.NL80211_KEY_CIPHER: WLAN_CIPHER_SUITE_CCMP,
-					nl80211.NL80211_KEY_DEFAULT: True
+					nl80211.NL80211_KEY_CIPHER: WLAN_CIPHER_SUITE_CCMP
 				}
 			}
 			await self.wlan.request(nl80211.NL80211_CMD_NEW_KEY, attrs)
