@@ -250,7 +250,7 @@ class AdvertisementFrame:
 		self.header.decode(stream.read(32), ">")
 		
 		self.version = stream.u8()
-		if self.version not in [2, 3]:
+		if self.version not in [2, 3, 4]:
 			raise ValueError("Advertisement frame has unsupported version number")
 		
 		self.encryption = stream.u8()
@@ -714,7 +714,7 @@ class AdvertisementMonitor:
 			try: action.decode(radiotap.data)
 			except Exception:
 				continue # Skip invalid frames
-			
+
 			# Check if we received an advertisement frame from LDN
 			if not action.action.startswith(header):
 				continue
