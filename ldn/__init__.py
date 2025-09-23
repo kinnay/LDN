@@ -416,7 +416,7 @@ class ChallengeRequest:
 		self.token = None
 		self.nonce = None
 		self.device_id = None
-		self.unk = bytes(16)
+		self.unk = b"a" * 16
 		self.params1 = []
 		self.params2 = []
 	
@@ -492,6 +492,7 @@ class ChallengeResponse:
 		self.device_id = None
 		self.device_id_host = None
 		self.unk = None
+		self.unk_host = bytes(16)
 	
 	def encode(self):
 		stream = streams.StreamOut("<")
@@ -503,7 +504,8 @@ class ChallengeResponse:
 		stream.u64(self.device_id)
 		stream.u64(self.device_id_host)
 		stream.write(self.unk)
-		stream.pad(0xA0)
+		stream.write(self.unk_host)
+		stream.pad(0x90)
 		
 		body = stream.get()
 	
@@ -536,7 +538,8 @@ class ChallengeResponse:
 		self.device_id = stream.u64()
 		self.device_id_host = stream.u64()
 		self.unk = stream.read(16)
-		stream.pad(0xA0)
+		self.unk_host = stream.read(16)
+		stream.pad(0x90)
 
 
 class AuthenticationRequest:
