@@ -8,10 +8,12 @@ import hashlib
 import socket
 import random
 import struct
-import math
 import hmac
 import copy
 import trio
+
+import logging
+logger = logging.getLogger(__name__)
 
 
 MACAddress = wlan.MACAddress
@@ -410,9 +412,11 @@ class AdvertisementFrame:
 		
 class ChallengeRequest:
 	def __init__(self):
+		self.flags = None
 		self.token = None
 		self.nonce = None
 		self.device_id = None
+		self.unk = bytes(16)
 		self.params1 = []
 		self.params2 = []
 	
@@ -422,14 +426,15 @@ class ChallengeRequest:
 		stream.u8(0) # Always 0
 		stream.u8(len(self.params1))
 		stream.u8(len(self.params2))
-		stream.u8(0) # Debug check
+		stream.u8(self.flags)
 		stream.pad(3)
 		
 		stream.u64(self.token)
 		stream.u64(self.nonce)
 		stream.u64(self.device_id)
-		
-		stream.pad(0x70)
+		stream.write(self.unk)
+
+		stream.pad(0x60)
 		
 		stream.repeat(self.params1, stream.u64)
 		stream.pad(8 * (8 - len(self.params1)))
@@ -466,13 +471,15 @@ class ChallengeRequest:
 		stream.pad(2)
 		n1 = stream.u8()
 		n2 = stream.u8()
-		stream.pad(4)
+		self.flags = stream.u8()
+		stream.pad(3)
 		
 		self.token = stream.u64()
 		self.nonce = stream.u64()
 		self.device_id = stream.u64()
+		self.unk = stream.read(16)
 		
-		stream.pad(0x70)
+		stream.pad(0x60)
 		
 		self.params1 = stream.repeat(stream.u64, 8)[:n1]
 		self.params2 = stream.repeat(stream.u64, 8)[:n2]
@@ -480,19 +487,23 @@ class ChallengeRequest:
 
 class ChallengeResponse:
 	def __init__(self):
+		self.flags = None
 		self.nonce = None
 		self.device_id = None
 		self.device_id_host = None
+		self.unk = None
 	
 	def encode(self):
 		stream = streams.StreamOut("<")
 		stream.u8(0) # Always 0
 		stream.u8(0) # Always 0
-		stream.pad(6)
+		stream.pad(2)
+		stream.u32(self.flags)
 		stream.u64(self.nonce)
 		stream.u64(self.device_id)
 		stream.u64(self.device_id_host)
-		stream.pad(0xB0)
+		stream.write(self.unk)
+		stream.pad(0xA0)
 		
 		body = stream.get()
 	
@@ -519,11 +530,13 @@ class ChallengeResponse:
 			raise ValueError("Challenge response has wrong HMAC")
 		
 		stream = streams.StreamIn(body, "<")
-		stream.pad(8)
+		stream.pad(4)
+		self.flags = stream.u32()
 		self.nonce = stream.u64()
 		self.device_id = stream.u64()
 		self.device_id_host = stream.u64()
-		stream.pad(0xB0)
+		self.unk = stream.read(16)
+		stream.pad(0xA0)
 
 
 class AuthenticationRequest:
@@ -985,6 +998,7 @@ class STANetwork:
 		
 		if self.param.enable_challenge:
 			challenge = ChallengeRequest()
+			challenge.flags = 0
 			challenge.token = self.network.challenge
 			challenge.nonce = random.randint(0, 0xFFFFFFFFFFFFFFFF)
 			challenge.device_id = self.param.device_id
@@ -1198,15 +1212,19 @@ class APNetwork:
 		try:
 			request.decode(challenge)
 		except Exception:
+			logger.exception("Failed to parse authentication challenge")
 			return None
 		
 		if request.token != self.network.challenge:
+			logger.warning("Received authentication request with wrong token")
 			return None
 		
 		response = ChallengeResponse()
+		response.flags = 2
 		response.nonce = request.nonce
 		response.device_id = request.device_id
 		response.device_id_host = self.device_id
+		response.unk = request.unk
 		return response.encode()
 	
 	def update_nonce(self):
