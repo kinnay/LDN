@@ -37,7 +37,10 @@ Implements the local wireless protocol used by the Nintendo Switch.
 `ACCEPT_ALL = 0`<br>
 `ACCEPT_NONE = 1`<br>
 `ACCEPT_BLACKLIST = 2`<br>
-`ACCEPT_WHITELIST = 3`
+`ACCEPT_WHITELIST = 3`<br>
+<br>
+`PLATFORM_NX = 0`<br>
+`PLATFORM_OUNCE = 1`
 </span>
 
 ## MACAddress
@@ -62,6 +65,8 @@ Implements the local wireless protocol used by the Nintendo Switch.
 ## NetworkInfo
 `local_communication_id: int`<br>
 <span class="docs">This is usually the title id of the game.</span><br>
+`app_version: int`<br>
+<span class="docs">The application communication version of the host.</span>
 `game_mode: int`<br>
 <span class="docs">Game mode (defined by game).</span>
 
@@ -78,6 +83,8 @@ Implements the local wireless protocol used by the Nintendo Switch.
 
 <code>address: [MACAddress](#macaddress)</code><br>
 <span class="docs">The MAC address of the network host.</span><br>
+`band: int`<br>
+<span class="docs">The WLAN band of the network (2 or 5).</span><br>
 `channel: int`<br>
 <span class="docs">The WLAN channel of the network.</span><br>
 `ssid: bytes`<br>
@@ -100,7 +107,9 @@ Implements the local wireless protocol used by the Nintendo Switch.
 `name: str`<br>
 <span class="docs">The nickname of the participant.</span><br>
 `app_version: int`<br>
-<span class="docs">The application communication version of the participant.</span>
+<span class="docs">The application communication version of the participant.</span><br>
+`platform: int`<br>
+<span class="docs">The platform that the participant is playing on. One of the [`PLATFORM_`](#global-constants) constants.</span>
 
 ## ConnectNetworkParam
 <code>**def \_\_init__**()</code><br>
@@ -120,6 +129,8 @@ Implements the local wireless protocol used by the Nintendo Switch.
 <span class="docs">Your nickname (up to 32 bytes)</span><br>
 `app_version: int`<br>
 <span class="docs">Your application communication version.</span>
+`platform: int = PLATFORM_NX`<br>
+<span class="docs">The platform that you are playing on. Must be one of the [`PLATFORM_`](#global-constants) constants.</span>
 
 `enable_challenge: bool = True`<br>
 <span class="docs">Specifies whether the DRM challenge is enabled. This is always enabled for games, but not for system titles.</span><br>
@@ -160,7 +171,9 @@ Implements the local wireless protocol used by the Nintendo Switch.
 `name: str`<br>
 <span class="docs">Your nickname (up to 32 bytes)</span><br>
 `app_version: int`<br>
-<span class="docs">Your application communication version.</span>
+<span class="docs">Your application communication version.</span><br>
+`platform: int = PLATFORM_NX`<br>
+<span class="docs">The platform that you are playing on. Must be one of the [`PLATFORM_`](#global-constants) constants.</span>
 
 `channel: int = None`<br>
 <span class="docs">The WLAN channel of the network. If `None`, the channel is chosen randomly from `1`, `6` or `11` during network creation.</span><br>
@@ -169,8 +182,8 @@ Implements the local wireless protocol used by the Nintendo Switch.
 `password: str = ""`<br>
 <span class="docs">Password. This is used to generate encryption keys.</span>
 
-`version: int = 3`<br>
-<span class="docs">LDN version (`2` or `3`).</span><br>
+`version: int = 4`<br>
+<span class="docs">LDN version (`2`, `3` or `4`).</span><br>
 `enable_challenge: bool = True`<br>
 <span class="docs">Specifies whether the DRM challenge is enabled. This is always enabled for games, but not for system titles.</span><br>
 `device_id: int = random.randint(0, 0xFFFFFFFFFFFFFFFF)`<br>

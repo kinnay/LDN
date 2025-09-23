@@ -22,7 +22,7 @@ setuptools.setup(
 	platforms = ["Linux"],
 	packages = ["ldn"],
 	install_requires = [
-		"python-netlink == 0.0.9",
+		"python-netlink == 0.0.10",
 		"pycryptodome"
 	]
 )

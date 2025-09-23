@@ -11,6 +11,16 @@ AcceptPolicies = {
 	ldn.ACCEPT_WHITELIST: "WHITELIST"
 }
 
+BandNames ={
+	2: "2.4 GHz",
+	5: "5 GHz"
+}
+
+Platforms = {
+	ldn.PLATFORM_NX: "Switch",
+	ldn.PLATFORM_OUNCE: "Switch 2"
+}
+
 async def main():
 	networks = await ldn.scan()
 	
@@ -26,6 +36,7 @@ async def main():
 		print("\tApplication data: <%i bytes>" %len(network.application_data))
 		print()
 		print("\tHost address: %s" %network.address)
+		print("\tWLAN band: %s" %BandNames[network.band])
 		print("\tWLAN channel: %i" %network.channel)
 		print("\tSSID: %s" %network.ssid.hex())
 		print()
@@ -39,6 +50,7 @@ async def main():
 				print("\t\tIP address: %s" %participant.ip_address)
 				print("\t\tMAC address: %s" %participant.mac_address)
 				print("\t\tApplication version: %i" %participant.app_version)
+				print("\t\tPlatform: %s" %Platforms[participant.platform])
 				print("\t\tConnected: %s" %participant.connected)
 				print("\t\t---")
 		

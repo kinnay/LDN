@@ -1,6 +1,6 @@
 
 from Crypto.Cipher import AES
-from ldn import streams, wlan, queue
+from ldn import streams, wlan, queue, util
 from netlink import route
 import contextlib
 import secrets
@@ -37,10 +37,33 @@ DISCONNECT_NETWORK_DESTROYED_FORCEFULLY = 4
 DISCONNECT_STATION_REJECTED_BY_HOST = 5
 DISCONNECT_CONNECTION_LOST = 6
 
+# Encryption algorithm
+ENCRYPTION_PLAIN = 1
+ENCRYPTION_AES_CTR = 2
+ENCRYPTION_AES_GCM = 3
+
+# Platform type
+PLATFORM_NX = 0
+PLATFORM_OUNCE = 1
+
 
 AES_KEK_GENERATION_SOURCE = bytes.fromhex("4d870986c45d20722fba1053da92e8a9")
 AES_KEY_GENERATION_SOURCE = bytes.fromhex("89615ee05c31b6805fe58f3da24f7aa8")
 MASTER_KEY = bytes.fromhex("c2caaff089b9aed55694876055271c7d")
+
+CHALLENGE_KEY = bytes.fromhex("f84b487fb37251c263bf11609036589266af70ca79b44c93c7370c5769c0f602")
+
+
+ChannelBands = {
+	1: 2,
+	6: 2,
+	11: 2,
+	36: 5,
+	40: 5,
+	44: 5,
+	48: 5,
+}
+
 
 def decrypt_key(key, kek):
 	aes = AES.new(kek, AES.MODE_ECB)
@@ -91,36 +114,12 @@ class SessionInfo:
 
 class ParticipantInfo:
 	def __init__(self):
-		self.reset()
-	
-	def reset(self):
 		self.ip_address = "0.0.0.0"
 		self.mac_address = MACAddress()
 		self.connected = False
 		self.name = ""
 		self.app_version = 0
-	
-	def encode(self):
-		name = self.name.encode()
-		stream = streams.StreamOut(">")
-		stream.write(socket.inet_aton(self.ip_address))
-		stream.write(self.mac_address.encode())
-		stream.bool(self.connected)
-		stream.pad(1)
-		stream.write(name + b"\0" * (32 - len(name)))
-		stream.u16(self.app_version)
-		stream.pad(10)
-		return stream.get()
-	
-	def decode(self, data):
-		stream = streams.StreamIn(data, ">")
-		self.ip_address = socket.inet_ntoa(stream.read(4))
-		self.mac_address = MACAddress(stream.read(6))
-		self.connected = stream.bool()
-		stream.pad(1)
-		self.name = stream.read(32).rstrip(b"\0").decode()
-		self.app_version = stream.u16()
-		stream.pad(10)
+		self.platform = PLATFORM_NX
 
 
 class AdvertisementInfo:
@@ -128,54 +127,153 @@ class AdvertisementInfo:
 		self.key = None
 		self.security_level = None
 		self.station_accept_policy = None
+
+		self.app_version = None
+
+		# Added in 20.0.0
+		self.band = None
+		self.channel = None
+
 		self.max_participants = None
 		self.num_participants = None
 		self.participants = None
 		self.application_data = None
+
+		# Added in 6.0.0
 		self.challenge = None
-	
-	def encode(self):
+
+
+class AdvertisementInfoEncoderV1:
+	def encode(self, info):
 		stream = streams.StreamOut(">")
-		stream.write(self.key)
-		stream.u16(self.security_level)
-		stream.u8(self.station_accept_policy)
-		stream.pad(3)
-		stream.u8(self.max_participants)
-		stream.u8(self.num_participants)
-		for participant in self.participants:
-			stream.write(participant.encode())
+		stream.write(info.key)
+		stream.u16(info.security_level)
+		stream.u8(info.station_accept_policy)
+		stream.pad(1)
+		stream.u16((info.band << 10) | info.channel)
+		stream.u8(info.max_participants)
+		stream.u8(info.num_participants)
+
+		for participant in info.participants:
+			name = participant.name.encode()
+			stream.write(socket.inet_aton(participant.ip_address))
+			stream.write(participant.mac_address.encode())
+			stream.bool(participant.connected)
+			stream.u8(participant.platform)
+			stream.write(name + b"\0" * (32 - len(name)))
+			stream.u16(participant.app_version)
+			stream.pad(10)
+		
 		stream.pad(2)
-		stream.u16(len(self.application_data))
-		stream.write(self.application_data + b"\0" * (384 - len(self.application_data)))
+		stream.u16(len(info.application_data))
+		stream.write(info.application_data + b"\0" * (384 - len(info.application_data)))
 		stream.pad(412)
-		stream.u64(self.challenge)
+		stream.u64(info.challenge)
 		return stream.get()
 	
 	def decode(self, data):
 		stream = streams.StreamIn(data, ">")
+
+		info = AdvertisementInfo()
+		info.key = stream.read(16)
+		info.security_level = stream.u16()
+		info.station_accept_policy = stream.u8()
+		stream.pad(1)
+
+		value = stream.u16()
+		info.band = value >> 10
+		info.channel = value & 0x3FF
+
+		info.max_participants = stream.u8()
+		info.num_participants = stream.u8()
 		
-		self.key = stream.read(16)
-		self.security_level = stream.u16()
-		self.station_accept_policy = stream.u8()
-		stream.pad(3)
-		self.max_participants = stream.u8()
-		self.num_participants = stream.u8()
-		
-		self.participants = []
+		info.participants = []
 		for i in range(8):
 			participant = ParticipantInfo()
-			participant.decode(stream.read(56))
-			self.participants.append(participant)
+			participant.ip_address = socket.inet_ntoa(stream.read(4))
+			participant.mac_address = MACAddress(stream.read(6))
+			participant.connected = stream.bool()
+			participant.platform = stream.u8()
+			participant.name = stream.read(32).rstrip(b"\0").decode()
+			participant.app_version = stream.u16()
+			stream.pad(10)
+			info.participants.append(participant)
+		
+		info.app_version = info.participants[0].app_version
 		
 		stream.pad(2)
 		
 		beacon_size = stream.u16()
 		beacon_data = stream.read(384)
-		self.application_data = beacon_data[:beacon_size]
+		info.application_data = beacon_data[:beacon_size]
 		
 		stream.pad(412)
 		
-		self.challenge = stream.u64()
+		info.challenge = stream.u64()
+		return info
+
+
+class AdvertisementInfoEncoderV2:
+	def encode(self, info):
+		stream = streams.StreamOut(">")
+		stream.write(info.key)
+		stream.u64(info.challenge)
+		stream.u8(info.security_level)
+		stream.u8(info.station_accept_policy)
+		stream.u16(info.app_version)
+		stream.pad(8)
+		stream.u16((info.band << 10) | info.channel)
+		stream.u8(info.max_participants)
+		stream.u8(info.num_participatns)
+
+		for index, participant in enumerate(info.participants):
+			if participant.connected:
+				name = participant.name.encode()
+				stream.write(socket.inet_aton(participant.ip_address))
+				stream.write(participant.mac_address.encode())
+				stream.u8(index)
+				stream.u8(participant.platform)
+				stream.write(name + b"\0" * (32 - len(name)))
+				stream.pad(4)
+		
+		stream.u16(len(info.application_data))
+		stream.write(info.application_data)
+		return stream.get()
+	
+	def decode(self, data):
+		stream = streams.StreamIn(data, ">")
+
+		info = AdvertisementInfo()
+		info.key = stream.read(16)
+		info.challenge = stream.u64()
+		info.security_level = stream.u8()
+		info.station_accept_policy = stream.u8()
+		info.app_version = stream.u16()
+		stream.pad(8)
+		
+		value = stream.u16()
+		info.band = value >> 10
+		info.channel = value & 0x3FF
+
+		info.max_participants = stream.u8()
+		info.num_participants = stream.u8()
+		
+		info.participants = [ParticipantInfo() for i in range(8)]
+		for i in range(info.num_participants):
+			participant = ParticipantInfo()
+			participant.ip_address = socket.inet_ntoa(stream.read(4))
+			participant.mac_address = MACAddress(stream.read(6))
+			index = stream.u8()
+			participant.platform = stream.u8()
+			participant.name = stream.read(32).rstrip(b"\0").decode()
+
+			participant.connected = True
+			participant.app_version = info.app_version
+
+			info.participants[index] = participant
+		
+		info.application_data = stream.read(stream.u16())
+		return info
 
 
 class AdvertisementFrame:
@@ -186,23 +284,37 @@ class AdvertisementFrame:
 		self.nonce = None
 		self.info = None
 	
-	def encrypt(self, data):
-		if self.encryption == 1:
-			return data
-		
+	def derive_key(self):
 		source = bytes.fromhex("191884743e24c77d87c69e4207d0c438")
-		key = derive_key(self.header.encode(">"), source)
+		return derive_key(self.header.encode(">"), source)
+	
+	def encrypt_ctr(self, data):
+		key = self.derive_key()
 		aes = AES.new(key, AES.MODE_CTR, nonce=self.nonce)
 		return aes.encrypt(data)
 	
-	def decrypt(self, data):
-		if self.encryption == 1:
-			return data
-		
-		source = bytes.fromhex("191884743e24c77d87c69e4207d0c438")
-		key = derive_key(self.header.encode(">"), source)
+	def encrypt_gcm(self, data):
+		key = self.derive_key()
+		nonce = self.nonce + bytes(8)
+		aes = AES.new(key, AES.MODE_GCM, nonce=nonce)
+		data, mac = aes.encrypt_and_digest(data)
+		return mac + data
+	
+	def decrypt_ctr(self, data):
+		key = self.derive_key()
 		aes = AES.new(key, AES.MODE_CTR, nonce=self.nonce)
 		return aes.decrypt(data)
+	
+	def decrypt_gcm(self, data):
+		key = self.derive_key()
+		nonce = self.nonce + bytes(8)
+		aes = AES.new(key, AES.MODE_GCM, nonce=nonce)
+		return aes.decrypt_and_verify(data[16:], data[:16])
+	
+	def make_advertisement_encoder(self, encryption):
+		if encryption == ENCRYPTION_AES_GCM:
+			return AdvertisementInfoEncoderV2()
+		return AdvertisementInfoEncoderV1()
 	
 	def encode(self):
 		stream = streams.StreamOut(">")
@@ -220,13 +332,26 @@ class AdvertisementFrame:
 		substream.u16(0x500)
 		substream.write(self.nonce)
 		header = substream.get()
+
+		encoder = self.make_advertisement_encoder(self.encryption)
+		plaintext = encoder.encode(self.info)
 		
-		info = self.info.encode()
-		message = header + bytes(32) + info
-		sha = hashlib.sha256(message).digest()
+		if self.encryption != ENCRYPTION_AES_GCM:
+			message = header + bytes(32) + plaintext
+			sha = hashlib.sha256(message).digest()
+			plaintext = sha + plaintext
+		
+		if self.encryption == ENCRYPTION_PLAIN:
+			ciphertext = plaintext
+		if self.encryption == ENCRYPTION_AES_CTR:
+			ciphertext = self.encrypt_ctr(plaintext)
+		elif self.encryption == ENCRYPTION_AES_GCM:
+			ciphertext = self.encrypt_gcm(plaintext)
+		else:
+			raise ValueError("An invalid encryption mode was specified")
 		
 		stream.write(header)
-		stream.write(self.encrypt(sha + info))
+		stream.write(ciphertext)
 		return stream.get()
 	
 	def decode(self, data):
@@ -254,25 +379,33 @@ class AdvertisementFrame:
 			raise ValueError("Advertisement frame has unsupported version number")
 		
 		self.encryption = stream.u8()
-		if self.encryption not in [1, 2]:
-			raise ValueError("Advertisement frame has invalid encryption algorithm")
 		
 		size = stream.u16()
 		if size != 0x500:
 			raise ValueError("Advertisement frame has unexpected size field")
 		
 		self.nonce = stream.read(4)
+
+		if self.encryption == ENCRYPTION_PLAIN:
+			plaintext = stream.read(32 + size)
+		elif self.encryption == ENCRYPTION_AES_CTR:
+			plaintext = self.decrypt_ctr(stream.read(32 + size))
+		elif self.encryption == ENCRYPTION_AES_GCM:
+			plaintext = self.decrypt_gcm(stream.read(16 + size))
+		else:
+			raise ValueError("Advertisement frame has invalid encryption algorithm")
 		
-		body = self.decrypt(stream.read(32 + size))
-		sha = body[:32]
-		info = body[32:]
+		if self.encryption == ENCRYPTION_AES_GCM:
+			info = plaintext
+		else:
+			sha = plaintext[:32]
+			info = plaintext[32:]
+			message = header + bytes(32) + info
+			if hashlib.sha256(message).digest() != sha:
+				raise ValueError("Advertisement frame has wrong SHA-256 hash")
 		
-		message = header + bytes(32) + info
-		if hashlib.sha256(message).digest() != sha:
-			raise ValueError("Advertisement frame has wrong SHA-256 hash")
-		
-		self.info = AdvertisementInfo()
-		self.info.decode(info)
+		encoder = self.make_advertisement_encoder(self.encryption)
+		self.info = encoder.decode(info)
 		
 		
 class ChallengeRequest:
@@ -306,8 +439,7 @@ class ChallengeRequest:
 		
 		body = stream.get()
 		
-		key = bytes.fromhex("f84b487fb37251c263bf11609036589266af70ca79b44c93c7370c5769c0f602")
-		mac = hmac.digest(key, body, "sha256")
+		mac = hmac.digest(CHALLENGE_KEY, body, "sha256")
 		
 		stream = streams.StreamOut("<")
 		stream.u32(0)
@@ -327,8 +459,7 @@ class ChallengeRequest:
 		stream.pad(12)
 		body = stream.read(0x2D0)
 		
-		key = bytes.fromhex("f84b487fb37251c263bf11609036589266af70ca79b44c93c7370c5769c0f602")
-		if mac != hmac.digest(key, body, "sha256"):
+		if mac != hmac.digest(CHALLENGE_KEY, body, "sha256"):
 			raise ValueError("Challenge request has wrong HMAC")
 		
 		stream = streams.StreamIn(body, "<")
@@ -365,8 +496,7 @@ class ChallengeResponse:
 		
 		body = stream.get()
 	
-		key = bytes.fromhex("f84b487fb37251c263bf11609036589266af70ca79b44c93c7370c5769c0f602")
-		mac = hmac.digest(key, body, "sha256")
+		mac = hmac.digest(CHALLENGE_KEY, body, "sha256")
 		
 		stream = streams.StreamOut("<")
 		stream.u32(0)
@@ -385,8 +515,7 @@ class ChallengeResponse:
 		stream.pad(12)
 		body = stream.read(0xD0)
 		
-		key = bytes.fromhex("f84b487fb37251c263bf11609036589266af70ca79b44c93c7370c5769c0f602")
-		if mac != hmac.digest(key, body, "sha256"):
+		if mac != hmac.digest(CHALLENGE_KEY, body, "sha256"):
 			raise ValueError("Challenge response has wrong HMAC")
 		
 		stream = streams.StreamIn(body, "<")
@@ -401,6 +530,7 @@ class AuthenticationRequest:
 	def __init__(self):
 		self.username = None
 		self.app_version = None
+		self.platform = None
 		self.challenge = None
 	
 	def encode(self, version):
@@ -409,7 +539,8 @@ class AuthenticationRequest:
 		name = self.username.encode()
 		stream.write(name + b"\0" * (32 - len(name)))
 		stream.u16(self.app_version)
-		stream.pad(30)
+		stream.u8(self.platform)
+		stream.pad(29)
 		
 		if version >= 3:
 			stream.pad(0x24)
@@ -422,7 +553,8 @@ class AuthenticationRequest:
 		
 		self.username = stream.read(32).rstrip(b"\0").decode()
 		self.app_version = stream.u16()
-		stream.pad(30)
+		self.platform = stream.u8()
+		stream.pad(29)
 		
 		if version >= 3:
 			stream.pad(0x24)
@@ -432,12 +564,14 @@ class AuthenticationRequest:
 
 class AuthenticationResponse:
 	def __init__(self):
+		self.platform = None
 		self.challenge = None
 	
 	def encode(self, version):
 		stream = streams.StreamOut(">")
 		if version >= 3:
-			stream.pad(0x84)
+			stream.u8(self.platform)
+			stream.pad(0x83)
 			if self.challenge is not None:
 				stream.write(self.challenge)
 		return stream.get()
@@ -445,7 +579,8 @@ class AuthenticationResponse:
 	def decode(self, data, version):
 		stream = streams.StreamIn(data, ">")
 		if version >= 3:
-			stream.pad(0x84)
+			self.platform = stream.u8()
+			stream.pad(0x83)
 			if not stream.eof():
 				self.challenge = stream.read(0x100)
 
@@ -540,6 +675,8 @@ class DisconnectFrame:
 class NetworkInfo:
 	def __init__(self):
 		self.address = None
+
+		self.band = None
 		self.channel = None
 		
 		self.local_communication_id = None
@@ -555,6 +692,7 @@ class NetworkInfo:
 		self.application_data = None
 		self.challenge = None
 		self.nonce = None
+		self.app_version = None
 	
 	def check(self, info):
 		if self.address != info.address: return False
@@ -580,6 +718,7 @@ class NetworkInfo:
 		self.participants = frame.info.participants
 		self.application_data = frame.info.application_data
 		self.challenge = frame.info.challenge
+		self.app_version = frame.info.app_version
 		self.nonce = frame.nonce
 	
 	def build(self):
@@ -592,6 +731,11 @@ class NetworkInfo:
 		info.key = self.key
 		info.security_level = self.security_level
 		info.station_accept_policy = self.accept_policy
+		info.app_version = self.app_version
+
+		info.band = self.band
+		info.channel = self.channel
+
 		info.max_participants = self.max_participants
 		info.num_participants = self.num_participants
 		info.participants = self.participants
@@ -617,13 +761,14 @@ class ConnectNetworkParam:
 		
 		self.name = ""
 		self.app_version = 0
+		self.platform = PLATFORM_NX
 		
 		self.enable_challenge = True
 		self.device_id = random.randint(0, 0xFFFFFFFFFFFFFFFF)
 
 	def check(self):
 		if self.network is None: raise ValueError("network is required")
-		if self.network.version not in [2, 3]:
+		if self.network.version not in [2, 3, 4]:
 			raise ValueError("Network version not supported")
 
 
@@ -636,7 +781,7 @@ class CreateNetworkParam:
 		
 		self.local_communication_id = None
 		self.game_mode = None
-		
+
 		self.max_participants = 8
 		self.application_data = b""
 		self.accept_policy = ACCEPT_ALL
@@ -646,12 +791,13 @@ class CreateNetworkParam:
 		
 		self.name = ""
 		self.app_version = 0
+		self.platform = PLATFORM_NX
 		
 		self.channel = None
 		self.key = None
 		self.password = ""
 		
-		self.version = 3
+		self.version = 4
 		self.enable_challenge = True
 		self.device_id = random.randint(0, 0xFFFFFFFFFFFFFFFF)
 
@@ -666,7 +812,7 @@ class CreateNetworkParam:
 			raise ValueError("channel is invalid")
 		if self.key is not None and len(self.key) != 16:
 			raise ValueError("key has wrong size")
-		if self.version not in [2, 3]:
+		if self.version not in [2, 3, 4]:
 			raise ValueError("version is invalid")
 
 
@@ -722,12 +868,13 @@ class AdvertisementMonitor:
 			# Decode the frame itself
 			frame = AdvertisementFrame()
 			try: frame.decode(action.action)
-			except Exception:
+			except Exception as e:
 				continue # Skip invalid frames
 			
 			info = NetworkInfo()
 			info.address = action.source
 			info.channel = wlan.map_frequency(radiotap.frequency)
+			info.band = ChannelBands[info.channel]
 			info.parse(frame)
 			return info
 
@@ -818,6 +965,7 @@ class STANetwork:
 				info = NetworkInfo()
 				info.address = event.frame.source
 				info.channel = wlan.map_frequency(event.frequency)
+				info.band = ChannelBands[info.channel]
 				info.parse(frame)
 				if not self.network.check(info):
 					raise ConnectionError("Received incompatible advertisement frame from host")
@@ -833,6 +981,7 @@ class STANetwork:
 		request = AuthenticationRequest()
 		request.username = self.param.name
 		request.app_version = self.param.app_version
+		request.platform = self.param.platform
 		
 		if self.param.enable_challenge:
 			challenge = ChallengeRequest()
@@ -963,6 +1112,7 @@ class APNetwork:
 		self.accept_filter = param.accept_filter
 		self.enable_challenge = param.enable_challenge
 		self.device_id = param.device_id
+		self.platform = param.platform
 		
 		self.nonce = random.randint(0, 0xFFFFFFFF)
 		self.network_id = random.randint(1, 127)
@@ -973,6 +1123,7 @@ class APNetwork:
 		participant.connected = True
 		participant.name = param.name
 		participant.app_version = param.app_version
+		participant.platform = param.platform
 		
 		participants = [participant]
 		for i in range(7):
@@ -981,6 +1132,7 @@ class APNetwork:
 		self.network = NetworkInfo()
 		self.network.address = interface.address
 		self.network.channel = param.channel
+		self.network.band = ChannelBands[param.channel]
 		self.network.local_communication_id = param.local_communication_id
 		self.network.game_mode = param.game_mode
 		self.network.ssid = param.ssid
@@ -992,6 +1144,7 @@ class APNetwork:
 		self.network.num_participants = 1
 		self.network.participants = participants
 		self.network.application_data = param.application_data
+		self.network.app_version = param.app_version
 		self.network.challenge = random.randint(0, 0xFFFFFFFFFFFFFFFF)
 		self.network.nonce = struct.pack(">I", self.nonce)
 		
@@ -1004,6 +1157,7 @@ class APNetwork:
 		header.ssid = self.network.ssid
 		
 		response = AuthenticationResponse()
+		response.platform = self.platform
 		response.challenge = challenge
 		
 		frame = AuthenticationFrame()
@@ -1025,7 +1179,7 @@ class APNetwork:
 		return False
 	
 	def check_authentication_request(self, address, frame):
-		if frame.version not in [2, 3]: return AUTH_INVALID_VERSION
+		if frame.version not in [2, 3, 4]: return AUTH_INVALID_VERSION
 		
 		if frame.status_code != 0: return AUTH_MALFORMED_REQUEST
 		if frame.header.local_communication_id != self.network.local_communication_id: return AUTH_MALFORMED_REQUEST
@@ -1121,11 +1275,11 @@ class APNetwork:
 		if challenge is None:
 			return self.make_authentication_response(AUTH_CHALLENGE_FAILURE, self.network.version, frame.authentication_key)
 		
-		await self.register_participant(event.address, frame.payload.username, frame.payload.app_version)
+		await self.register_participant(event.address, frame.payload.username, frame.payload.app_version, frame.payload.platform)
 		
 		return self.make_authentication_response(AUTH_SUCCESS, self.network.version, frame.authentication_key, challenge)
 	
-	async def register_participant(self, address, name, app_version):
+	async def register_participant(self, address, name, app_version, platform):
 		# Allocate an ip address
 		for index in range(8):
 			if not self.network.participants[index].connected:
@@ -1137,6 +1291,7 @@ class APNetwork:
 		participant.connected = True
 		participant.name = name
 		participant.app_version = app_version
+		participant.platform = platform
 		
 		self.network.participants[index] = participant
 		self.update_nonce()
