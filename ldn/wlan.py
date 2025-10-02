@@ -318,7 +318,7 @@ class AssociationRequest:
 		
 		header = MACHeader()
 		header.decode(stream.read(24))
-		if header.frame_control != IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_ASSOC_REQ:
+		if header.frame_control & 0xFF != IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_ASSOC_REQ:
 			raise ValueError("Frame is not an association request")
 		
 		self.target = header.address1
@@ -468,7 +468,7 @@ class AuthenticationFrame:
 		
 		header = MACHeader()
 		header.decode(stream.read(24))
-		if header.frame_control != IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_AUTH:
+		if header.frame_control & 0xFF != IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_AUTH:
 			raise ValueError("Frame is not an authentication frame")
 		
 		self.target = header.address1
@@ -531,7 +531,7 @@ class ActionFrame:
 		
 		header = MACHeader()
 		header.decode(stream.read(24))
-		if header.frame_control != IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_ACTION:
+		if header.frame_control & 0xFF != IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_ACTION:
 			raise ValueError("Frame is not an action frame")
 		
 		self.source = header.address2
