@@ -761,7 +761,7 @@ class NetworkInfo:
 		frame = AdvertisementFrame()
 		frame.header = header
 		frame.version = self.version
-		frame.encryption = 1 if self.security_level == 3 else 2
+		frame.encryption = ENCRYPTION_PLAIN if self.security_level == 3 else ENCRYPTION_AES_CTR
 		frame.nonce = self.nonce
 		frame.info = info
 		return frame
@@ -934,6 +934,7 @@ class STANetwork:
 		try:
 			frame.decode(data)
 		except Exception:
+			logger.warning("Failed to authentication response")
 			return False # Ignore invalid frames
 		
 		if not isinstance(frame.payload, AuthenticationResponse): return False
@@ -1215,7 +1216,7 @@ class APNetwork:
 		try:
 			request.decode(challenge)
 		except Exception:
-			logger.exception("Failed to parse authentication challenge")
+			logger.warning("Failed to parse authentication challenge")
 			return None
 		
 		if request.token != self.network.challenge:
@@ -1286,6 +1287,7 @@ class APNetwork:
 		try:
 			frame.decode(event.data)
 		except Exception:
+			logger.warning("Failed to parse authentication request")
 			return self.make_authentication_response(AUTH_MALFORMED_REQUEST, self.network.version, bytes(16))
 		
 		error = self.check_authentication_request(event.address, frame)
@@ -1315,6 +1317,8 @@ class APNetwork:
 		participant.platform = platform
 		
 		self.network.participants[index] = participant
+		self.network.num_participants += 1
+		
 		self.update_nonce()
 
 		await self.interface.set_authorized(address)
@@ -1332,9 +1336,12 @@ class APNetwork:
 		for index, participant in enumerate(self.network.participants):
 			if participant.connected and participant.mac_address == address:
 				break
-		else: return
+		else:
+			return
 		
 		participant.connected = False
+		self.network.num_participants -= 1
+
 		self.update_nonce()
 		
 		# Remove neighbor entry
