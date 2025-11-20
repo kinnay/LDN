@@ -506,7 +506,23 @@ class DeauthenticationFrame:
 		self.bssid = None
 		self.reason = None
 		self.elements = {}
-	
+
+	def decode(self, data):
+		stream = streams.StreamIn(data, "<")
+
+		header = MACHeader()
+		header.decode(stream.read(24))
+		if header.frame_control & 0xFF != IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_DEAUTH:
+			raise ValueError("Frame is not an deauthentication frame")
+
+		self.target = header.address1
+		self.source = header.address2
+		self.bssid = header.address3
+
+		self.reason = stream.u16()
+
+		self.elements = decode_elements(stream.readall())
+
 	def encode(self):
 		stream = streams.StreamOut("<")
 		
@@ -712,17 +728,22 @@ class STAInterface:
 			nl80211.NL80211_ATTR_SSID: self.ssid.encode(),
 			nl80211.NL80211_ATTR_WIPHY_FREQ: Channels[self.channel],
 			nl80211.NL80211_ATTR_AUTH_TYPE: nl80211.NL80211_AUTHTYPE_OPEN_SYSTEM,
-			nl80211.NL80211_ATTR_CIPHER_SUITES_PAIRWISE: struct.pack("I", WLAN_CIPHER_SUITE_CCMP),
-			nl80211.NL80211_ATTR_CIPHER_SUITE_GROUP: WLAN_CIPHER_SUITE_CCMP,
-			nl80211.NL80211_ATTR_AKM_SUITES: struct.pack("I", WLAN_AKM_SUITE_PSK),
-			nl80211.NL80211_ATTR_IE: encode_elements(elements),
-			nl80211.NL80211_ATTR_PRIVACY: True,
 			
 			nl80211.NL80211_ATTR_CONTROL_PORT: True,
 			nl80211.NL80211_ATTR_CONTROL_PORT_ETHERTYPE: struct.pack("H", ETH_P_OUI),
 			nl80211.NL80211_ATTR_CONTROL_PORT_OVER_NL80211: True,
 			nl80211.NL80211_ATTR_SOCKET_OWNER: True
 		}
+
+		if self.key is not None:
+			attrs[nl80211.NL80211_ATTR_CIPHER_SUITES_PAIRWISE] = struct.pack("I", WLAN_CIPHER_SUITE_CCMP)
+			attrs[nl80211.NL80211_ATTR_CIPHER_SUITE_GROUP] = WLAN_CIPHER_SUITE_CCMP
+			attrs[nl80211.NL80211_ATTR_AKM_SUITES] = struct.pack("I", WLAN_AKM_SUITE_PSK)
+			attrs[nl80211.NL80211_ATTR_IE] = encode_elements(elements)
+			attrs[nl80211.NL80211_ATTR_PRIVACY] = True
+		else:
+			attrs[nl80211.NL80211_ATTR_PRIVACY] = False
+
 		await self.wlan.request(nl80211.NL80211_CMD_CONNECT, attrs)
 		
 		while True:
@@ -833,13 +854,15 @@ class APInterface:
 		response.source = self.interface.address
 		response.target = address
 		response.beacon_interval = 100
-		response.capability_information = 0x511
+		response.capability_information = 0x501
 		response.elements = {
 			WLAN_EID_SSID: ssid.encode(),
 			WLAN_EID_SUPP_RATES: rates.encode(),
 			WLAN_EID_DS_PARAMS: dsparams.encode(),
-			WLAN_EID_RSN: rsn.encode()
 		}
+		if self.key is not None:
+			response.capability_information |= 0x10
+			response.elements[WLAN_EID_RSN] = rsn.encode()
 		return response.encode()
 	
 	def create_association_response(self, address, aid):
@@ -874,7 +897,8 @@ class APInterface:
 			IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_ASSOC_REQ: AssociationRequest,
 			IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_PROBE_REQ: ProbeRequest,
 			IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_DISASSOC: DisassociationFrame,
-			IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_AUTH: AuthenticationFrame
+			IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_AUTH: AuthenticationFrame,
+			IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_DEAUTH: DeauthenticationFrame,
 		}[header.frame_control]()
 		frame.decode(data)
 		return frame
@@ -941,6 +965,7 @@ class APInterface:
 			await self.register_frame(IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_PROBE_REQ)
 			await self.register_frame(IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_DISASSOC)
 			await self.register_frame(IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_AUTH)
+			await self.register_frame(IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_DEAUTH)
 			
 			async with util.background_task(self.process_messages):
 				yield
@@ -990,7 +1015,7 @@ class APInterface:
 			if ssid == self.ssid.encode():
 				response = await self.process_association_request(frame)
 				await self.send_frame(response)
-		elif isinstance(frame, DisassociationFrame):
+		elif isinstance(frame, DisassociationFrame) or isinstance(frame, DeauthenticationFrame):
 			await self.process_disassociation(frame)
 	
 	async def process_association_request(self, frame):
@@ -1047,11 +1072,15 @@ class APInterface:
 		
 		aid = self.stations_by_address.pop(frame.source)
 		del self.stations_by_id[aid]
-		
+
+		subtype = IEEE80211_STYPE_DISASSOC
+		if isinstance(frame, DeauthenticationFrame):
+			subtype = IEEE80211_STYPE_DEAUTH
+
 		attrs = {
 			nl80211.NL80211_ATTR_IFINDEX: self.interface.index,
 			nl80211.NL80211_ATTR_MAC: frame.source.encode(),
-			nl80211.NL80211_ATTR_MGMT_SUBTYPE: IEEE80211_STYPE_DISASSOC >> 4,
+			nl80211.NL80211_ATTR_MGMT_SUBTYPE: subtype >> 4,
 			nl80211.NL80211_ATTR_REASON_CODE: frame.reason
 		}
 		await self.wlan.request(nl80211.NL80211_CMD_DEL_STATION, attrs)
