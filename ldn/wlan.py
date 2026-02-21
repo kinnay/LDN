@@ -1433,16 +1433,15 @@ class AccessPoint(Interface):
         """
         await self.up()
         self.disable_ipv6()
+        for type in [
+            IEEE80211_STYPE_ASSOC_REQ,
+            IEEE80211_STYPE_PROBE_REQ,
+            IEEE80211_STYPE_DISASSOC,
+            IEEE80211_STYPE_AUTH,
+            IEEE80211_STYPE_DEAUTH
+        ]:
+            await self._register_frame(type)
         async with self._start_ap():
-            for type in [
-                IEEE80211_STYPE_ASSOC_REQ,
-                IEEE80211_STYPE_PROBE_REQ,
-                IEEE80211_STYPE_DISASSOC,
-                IEEE80211_STYPE_AUTH,
-                IEEE80211_STYPE_DEAUTH
-            ]:
-                await self._register_frame(type)
-            
             async with util.background_task(self._process_messages):
                 yield
     
