@@ -1602,29 +1602,6 @@ class AccessPoint(Interface):
             if message.type == nl80211.NL80211_CMD_START_AP:
                 break
 
-        if self._key is not None:
-            attrs = {
-                nl80211.NL80211_ATTR_IFINDEX: self.index(),
-                nl80211.NL80211_ATTR_KEY: {
-                    nl80211.NL80211_KEY_IDX: 1,
-                    nl80211.NL80211_KEY_DATA: self._key,
-                    nl80211.NL80211_KEY_CIPHER: WLAN_CIPHER_SUITE_CCMP
-                }
-            }
-            await self._wlan.request(nl80211.NL80211_CMD_NEW_KEY, attrs)
-
-            attrs = {
-                nl80211.NL80211_ATTR_IFINDEX: self.index(),
-                nl80211.NL80211_ATTR_KEY: {
-                    nl80211.NL80211_KEY_IDX: 1,
-                    nl80211.NL80211_KEY_DEFAULT: True,
-                    nl80211.NL80211_KEY_DEFAULT_TYPES: {
-                        nl80211.NL80211_KEY_DEFAULT_TYPE_MULTICAST: True
-                    }
-                }
-            }
-            await self._wlan.request(nl80211.NL80211_CMD_SET_KEY, attrs)
-        
         try:
             yield
         finally:
@@ -1730,19 +1707,7 @@ class AccessPoint(Interface):
             attrs[nl80211.NL80211_ATTR_STA_SUPPORTED_CHANNELS] = \
                 frame.elements[WLAN_EID_SUPPORTED_CHANNELS]
         await self._wlan.request(nl80211.NL80211_CMD_NEW_STATION, attrs)
-        
-        if self._key is not None:
-            attrs = {
-                nl80211.NL80211_ATTR_IFINDEX: self.index(),
-                nl80211.NL80211_ATTR_MAC: frame.source.encode(),
-                nl80211.NL80211_ATTR_KEY: {
-                    nl80211.NL80211_KEY_IDX: 0,
-                    nl80211.NL80211_KEY_DATA: self._key,
-                    nl80211.NL80211_KEY_CIPHER: WLAN_CIPHER_SUITE_CCMP
-                }
-            }
-            await self._wlan.request(nl80211.NL80211_CMD_NEW_KEY, attrs)
-        
+
         await self._events.put(AssociationEvent(frame.source))
         return self._create_association_response(frame.source, aid)
     
