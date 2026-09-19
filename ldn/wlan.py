@@ -45,6 +45,10 @@ ETH_P_IP = 0x800
 ETH_P_ARP = 0x806
 ETH_P_OUI = 0x88B7
 
+# Radiotap's historical "WEP" flag requests encryption using the key and
+# cipher configured for the interface; it also applies to CCMP keys.
+IEEE80211_RADIOTAP_F_WEP = 0x04
+
 
 IEEE80211_FTYPE_MGMT = 0
 IEEE80211_FTYPE_CTL = 1
@@ -1167,10 +1171,18 @@ class Monitor(Interface):
             except Exception as e:
                 logger.debug(f"Ignoring invalid frame: {e}")
     
-    async def send_frame(self, frame: FrameType) -> None:
-        """Sends an IEEE 802.11 through the underlying interface."""
+    async def send_frame(
+        self, frame: FrameType, *, encrypt: bool = False
+    ) -> None:
+        """Sends an IEEE 802.11 frame, optionally requesting encryption.
+
+        Monitor injection is unencrypted by default. Setting ``encrypt`` asks
+        mac80211 to protect the frame with the interface's configured key.
+        """
         async with self._lock:
             radiotap = RadiotapFrame(frame.encode())
+            if encrypt:
+                radiotap.flags = IEEE80211_RADIOTAP_F_WEP
             await self.send(radiotap)
     
     def _parse_frame(self, data: bytes) -> FrameType | None:
@@ -1478,6 +1490,17 @@ class AccessPoint(Interface):
             nl80211.NL80211_ATTR_REASON_CODE: WLAN_REASON_UNSPECIFIED
         }
         await self._wlan.request(nl80211.NL80211_CMD_DEL_STATION, attrs)
+
+    async def set_authorized(self, addr: MACAddress) -> None:
+        """Opens the userspace-controlled port for an authenticated station."""
+
+        flag = 1 << nl80211.NL80211_STA_FLAG_AUTHORIZED
+        attrs = {
+            nl80211.NL80211_ATTR_IFINDEX: self.index(),
+            nl80211.NL80211_ATTR_MAC: addr.encode(),
+            nl80211.NL80211_ATTR_STA_FLAGS2: struct.pack("II", flag, flag)
+        }
+        await self._wlan.request(nl80211.NL80211_CMD_SET_STATION, attrs)
     
     def _create_beacon_head(self) -> bytes:
         """Creates and encodes a beacon frame for transmission."""
