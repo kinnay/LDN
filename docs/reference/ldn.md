@@ -222,7 +222,9 @@ Implements the local wireless protocol used by the Nintendo Switch.
 `override_data_key: bytes | None = None`<br>
 <span class="docs">Overrides the key that is used to encrypt data frames. This is normally not required, but can be useful while researching new protocol versions.</span><br>
 `override_challenge_key: bytes | None = None`<br>
-<span class="docs">Overrides the HMAC key that is used for the local concurrency check. This is normally not required.</span>
+<span class="docs">Overrides the HMAC key that is used for the local concurrency check. This is normally not required.</span><br>
+`skip_encryption: bool = False`<br>
+<span class="docs">Delegates data-frame CCMP encryption to mac80211 instead of applying it in software. This may be required for drivers that would otherwise encrypt an injected frame twice.</span>
 
 ## STANetwork
 <code>**def info**() -> [NetworkInfo](#networkinfo)</code><br>

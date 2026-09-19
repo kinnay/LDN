@@ -1110,6 +1110,11 @@ class CreateNetworkParam:
     override_advertise_key: bytes | None = None
     override_challenge_key: bytes | None = None
 
+    # Keep the portable software-CCMP transmit path by default. Some drivers
+    # encrypt injected frames again, so callers may delegate the one CCMP layer
+    # to mac80211/hardware instead.
+    skip_encryption: bool = False
+
     def check(self):
         if self.max_participants > 8:
             raise ValueError("max_participants is too high")
@@ -1753,6 +1758,11 @@ class APNetwork:
         for index in range(8):
             if not self._network.participants[index].connected:
                 break
+
+        # START_AP enables userspace control-port handling, which leaves a new
+        # station unauthorized until the custom LDN authentication succeeds.
+        # Complete the kernel-side state transition before publishing it.
+        await self._interface.set_authorized(address)
         
         self._peers.append(address)
         
@@ -1844,7 +1854,11 @@ class APNetwork:
             snap.protocol = ethernet.protocol
             snap.payload = ethernet.payload
 
-            await self._send_data_frame(snap.encode())
+            # mac80211 selects the pairwise or group key from the destination.
+            # Preserve the existing broadcast-only behavior for software CCMP.
+            target = ethernet.target \
+                if self._key and self._param.skip_encryption else None
+            await self._send_data_frame(snap.encode(), target)
     
     async def _process_data_frame(self, frame: wlan.DataFrame) -> None:
         if frame.protected:
@@ -1873,18 +1887,25 @@ class APNetwork:
         header.payload = snap.payload
         await self._tap.write(header.encode())
     
-    async def _send_data_frame(self, data: bytes) -> None:
-        # We are simply sending all frames to the broadcast address here.
+    async def _send_data_frame(
+        self, data: bytes, target: MACAddress | None = None
+    ) -> None:
+        if target is None:
+            target = MACAddress("ff:ff:ff:ff:ff:ff")
+
         frame = wlan.DataFrame()
-        frame.target = MACAddress("ff:ff:ff:ff:ff:ff")
+        frame.target = target
         frame.source = self._monitor.address()
         frame.bssid = self._monitor.address()
         frame.payload = data
         frame.fromds = True
-        if self._key:
+        kernel_encrypt = bool(self._key and self._param.skip_encryption)
+        if self._key and not kernel_encrypt:
             self._data_nonce += 1
             frame.encrypt(self._key, self._data_nonce, 1)
-        await self._monitor.send_frame(frame)
+        # With skip_encryption, only Python CCMP is skipped. The radiotap
+        # request below makes mac80211/hardware protect the frame exactly once.
+        await self._monitor.send_frame(frame, encrypt=kernel_encrypt)
 
 
 async def scan(
