@@ -22,12 +22,16 @@ import netlink
 import socket
 import string
 import struct
+import subprocess
 import trio
 import typing
 
 import logging
 logger = logging.getLogger(__name__)
 
+
+# How long to wait for the kernel's connect result before giving up.
+CONNECT_TIMEOUT = 15
 
 SIOCGIFFLAGS = 0x8913
 SIOCSIFFLAGS = 0x8914
@@ -1037,6 +1041,37 @@ type EventType = AssociationEvent | DisassociationEvent | ActionFrameEvent | \
     CustomFrameEvent
 
 
+_EVENT_NAMES = {
+    nl80211.NL80211_CMD_NEW_INTERFACE: "new_interface",
+    nl80211.NL80211_CMD_DEL_INTERFACE: "del_interface",
+    nl80211.NL80211_CMD_TRIGGER_SCAN: "scan_started",
+    nl80211.NL80211_CMD_NEW_SCAN_RESULTS: "scan_done",
+    nl80211.NL80211_CMD_SCAN_ABORTED: "scan_aborted",
+    nl80211.NL80211_CMD_AUTHENTICATE: "authenticate",
+    nl80211.NL80211_CMD_ASSOCIATE: "associate",
+    nl80211.NL80211_CMD_CONNECT: "connect",
+    nl80211.NL80211_CMD_DISCONNECT: "disconnect",
+    nl80211.NL80211_CMD_NEW_STATION: "new_station",
+    nl80211.NL80211_CMD_DEL_STATION: "del_station",
+}
+
+
+def _describe_event(message) -> str:
+    """One nl80211 event as a short string: name, interface and result fields."""
+    a = message.attributes
+    text = _EVENT_NAMES.get(message.type, f"cmd{message.type}")
+    text += f"[if{a.get(nl80211.NL80211_ATTR_IFINDEX)}"
+    for attr, label in (
+        (nl80211.NL80211_ATTR_STATUS_CODE, "status"),
+        (nl80211.NL80211_ATTR_REASON_CODE, "reason"),
+    ):
+        if attr in a:
+            text += f" {label}={a[attr]}"
+    if nl80211.NL80211_ATTR_TIMED_OUT in a:
+        text += " timed_out"
+    return text + "]"
+
+
 class Interface:
     """Class that provides common operations for WLAN interfaces."""
 
@@ -1067,11 +1102,17 @@ class Interface:
     
     def disable_ipv6(self) -> None:
         """Disables IPv6 on the interface."""
-        filename = f"/proc/sys/net/ipv6/conf/{self._name}/disable_ipv6"
+        filename = f"/proc/sys/net/ipv6/conf/{self.name()}/disable_ipv6"
         with open(filename, "w") as f:
             f.write("1")
-    
+
     def name(self) -> str:
+        # udev may rename the interface after it is created (for example to
+        # wlx<mac>). The index does not change, so look the name up from it.
+        try:
+            self._name = socket.if_indextoname(self._index)
+        except OSError:
+            pass
         return self._name
 
     def index(self) -> int:
@@ -1721,25 +1762,93 @@ class Station(Interface):
             # If no key is provided, the frames are not encrypted.
             attrs[nl80211.NL80211_ATTR_PRIVACY] = False
 
-        await self._wlan.request(nl80211.NL80211_CMD_CONNECT, attrs)
-        
-        while True:
-            message = await self._wlan.receive()
-            if message.type == nl80211.NL80211_CMD_CONNECT:
-                status = message.attributes[nl80211.NL80211_ATTR_STATUS_CODE]
-                if status != WLAN_STATUS_SUCCESS:
-                    error = f"Connect failed with status code {status}"
-                    raise ConnectionError(error)
-                break
-        
+        logger.info(
+            f"CMD_CONNECT on {self.name()} (ifindex {self.index()}): "
+            f"ssid {self._ssid}, channel {self._channel} ({Channels[self._channel]} MHz), "
+            f"privacy={self._key is not None}, "
+            f"socket_owner={nl80211.NL80211_ATTR_SOCKET_OWNER in attrs}"
+        )
+        try:
+            await self._wlan.request(nl80211.NL80211_CMD_CONNECT, attrs)
+        except OSError as e:
+            raise ConnectionError(
+                f"CMD_CONNECT request rejected by the kernel: errno {e.errno} ({e})"
+            ) from e
+
+        # Everything nl80211 reports while we wait, for the error message.
+        seen: list[str] = []
+        try:
+            with trio.fail_after(CONNECT_TIMEOUT):
+                while True:
+                    message = await self._wlan.receive()
+                    ifindex = message.attributes.get(nl80211.NL80211_ATTR_IFINDEX)
+                    seen.append(_describe_event(message))
+                    # The mlme group carries events for every interface on the
+                    # system; only this one's connect result counts.
+                    if ifindex != self.index():
+                        continue
+                    if message.type == nl80211.NL80211_CMD_CONNECT:
+                        status = message.attributes.get(nl80211.NL80211_ATTR_STATUS_CODE)
+                        if nl80211.NL80211_ATTR_TIMED_OUT in message.attributes:
+                            raise ConnectionError(
+                                f"Connect timed out in the kernel (status {status}); "
+                                f"events: {', '.join(seen)}"
+                            )
+                        if status != WLAN_STATUS_SUCCESS:
+                            error = f"Connect failed with status code {status}; " \
+                                f"events: {', '.join(seen)}"
+                            raise ConnectionError(error)
+                        break
+                    if message.type == nl80211.NL80211_CMD_DISCONNECT:
+                        reason = message.attributes.get(nl80211.NL80211_ATTR_REASON_CODE)
+                        raise ConnectionError(
+                            f"Disconnected (reason {reason}) before the connect "
+                            f"completed; events: {', '.join(seen)}"
+                        )
+        except trio.TooSlowError:
+            state = await self._describe_state()
+            raise TimeoutError(
+                f"No connect result for {self.name()} after {CONNECT_TIMEOUT}s. "
+                f"Interface: {state}. nl80211 events seen: "
+                f"{', '.join(seen) or 'none'}"
+            ) from None
+        logger.info(f"Connected: {', '.join(seen)}")
+
         try:
             self._host_address = message.attributes[nl80211.NL80211_ATTR_MAC]
             if self._key is not None:
                 await self._register_key(self._key)
             yield
         finally:
-            attrs = {nl80211.NL80211_ATTR_IFINDEX: self.index()}
-            await self._wlan.request(nl80211.NL80211_CMD_DISCONNECT, attrs)
+            with trio.CancelScope(shield=True), trio.move_on_after(2):
+                attrs = {nl80211.NL80211_ATTR_IFINDEX: self.index()}
+                try:
+                    await self._wlan.request(nl80211.NL80211_CMD_DISCONNECT, attrs)
+                except OSError as e:
+                    logger.warning(f"Disconnect failed: {e}")
+
+    async def _describe_state(self) -> str:
+        """The interface's name, type, frequency and link state, for errors."""
+        try:
+            messages = await self._wlan.request(
+                nl80211.NL80211_CMD_GET_INTERFACE,
+                {nl80211.NL80211_ATTR_IFINDEX: self.index()}
+            )
+            a = messages[0].attributes
+            state = (
+                f"name={a.get(nl80211.NL80211_ATTR_IFNAME)} "
+                f"iftype={a.get(nl80211.NL80211_ATTR_IFTYPE)} "
+                f"freq={a.get(nl80211.NL80211_ATTR_WIPHY_FREQ)} "
+                f"generation={a.get(nl80211.NL80211_ATTR_GENERATION)}"
+            )
+        except Exception as e:
+            state = f"GET_INTERFACE failed: {e}"
+        try:
+            with open(f"/sys/class/net/{self.name()}/operstate") as f:
+                state += f" operstate={f.read().strip()}"
+        except OSError:
+            pass
+        return state
     
     async def _process_messages(self) -> None:
         """
@@ -1860,6 +1969,8 @@ class Factory:
         """
         Creates an interface in station mode and connects it to the given SSID.
         """
+        # Scan events show whether the kernel's pre-connect scan ran.
+        self._wlan.add_membership("scan")
         async with self._create_interface(
             phyname, ifname, nl80211.NL80211_IFTYPE_STATION
         ) as attributes:
@@ -1917,8 +2028,25 @@ class Factory:
         try:
             yield attributes
         finally:
-            attrs = {nl80211.NL80211_ATTR_IFINDEX: index}
-            await self._wlan.request(nl80211.NL80211_CMD_DEL_INTERFACE, attrs)
+            # Shielded, so a cancelled join still deletes its interface.
+            deleted = False
+            with trio.CancelScope(shield=True), trio.move_on_after(2):
+                attrs = {nl80211.NL80211_ATTR_IFINDEX: index}
+                try:
+                    await self._wlan.request(nl80211.NL80211_CMD_DEL_INTERFACE, attrs)
+                    deleted = True
+                except OSError as e:
+                    logger.warning(f"DEL_INTERFACE {index} failed: {e}")
+            if not deleted:
+                # The netlink reader may already be gone. Fall back to iw,
+                # finding the name from the index in case udev renamed it.
+                try:
+                    subprocess.run(
+                        ["iw", "dev", socket.if_indextoname(index), "del"],
+                        check=False, timeout=5
+                    )
+                except (OSError, subprocess.SubprocessError):
+                    pass
     
     async def _get_wiphy_index(self, name: str) -> int:
         """Returns the PHY index with the given name."""
