@@ -160,15 +160,13 @@ Implements the local wireless protocol used by the Nintendo Switch.
 <span class="docs">Creates a new instance with the default values. The `local_communication_id`, `scene_id`, `name`, `app_version` and `keys` fields are always required.</span>
 
 `ifname: str = "ldn"`<br>
-<span class="docs">The interface name for the access point. The interface names must not already be in use.</span><br>
-`ifname_monitor: str = "ldn-mon"`<br>
-<span class="docs">The interface name for the monitor. The interface names must not already be in use.</span><br>
+<span class="docs">The main interface name for the access point. The interface names must not already be in use.</span><br>
+`ifname_active: str = "ldn-ack"`<br>
+<span class="docs">The interface name for the active monitor. The interface names must not already be in use.</span><br>
 `ifname_tap: str = "ldn-tap"`<br>
 <span class="docs">A name for the TAP interface. The interface names must not already be in use.</span><br>
 `phyname: str = "phy0"`<br>
-<span class="docs">The name of the wiphy on which the access point interface are created.</span>
-`phyname_monitor: str = "phy0"`<br>
-<span class="docs">The name of the wiphy on which the monitor interface is created.</span>
+<span class="docs">The name of the wiphy on which the monitor mode interfaces are created.</span>
 
 `local_communication_id: int`<br>
 <span class="docs">This is usually the title id.</span><br>
