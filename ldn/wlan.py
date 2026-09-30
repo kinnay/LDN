@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from Crypto.Cipher import AES
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 
 from netlink import nl80211, route
@@ -84,6 +84,7 @@ WLAN_AUTH_OPEN = 0
 WLAN_EID_SSID = 0
 WLAN_EID_SUPP_RATES = 1
 WLAN_EID_DS_PARAMS = 3
+WLAN_EID_TIM = 5
 WLAN_EID_SUPPORTED_CHANNELS = 36
 WLAN_EID_HT_CAPABILITY = 45
 WLAN_EID_RSN = 48
@@ -235,6 +236,22 @@ class DSParamsElement:
 
 
 @dataclass
+class TIMElement:
+    dtim_count: int
+    dtim_period: int
+    bitmap_control: int
+    partial_virtual_bitmap: int
+
+    def encode(self) -> bytes:
+        stream = streams.StreamOut("<")
+        stream.u8(self.dtim_count)
+        stream.u8(self.dtim_period)
+        stream.u8(self.bitmap_control)
+        stream.u8(self.partial_virtual_bitmap)
+        return stream.get()
+
+
+@dataclass
 class RSNElement:
     group_cipher_suite: int
     pairwise_cipher_suites: list[int]
@@ -347,7 +364,8 @@ class MACHeader:
     address1: MACAddress = MACAddress()
     address2: MACAddress = MACAddress()
     address3: MACAddress = MACAddress()
-    sequence_control: int = 0
+    sequence_id: int = 0
+    fragment_id: int = 0
     
     def encode(self) -> bytes:
         frame_control = (self.type << 2) | (self.subtype << 4) | \
@@ -358,7 +376,7 @@ class MACHeader:
         stream.write(self.address1.encode())
         stream.write(self.address2.encode())
         stream.write(self.address3.encode())
-        stream.u16(self.sequence_control)
+        stream.u16((self.sequence_id << 4) | self.fragment_id)
         return stream.get()
     
     def decode(self, data: bytes) -> None:
@@ -376,7 +394,10 @@ class MACHeader:
         self.address1 = MACAddress(stream.read(6))
         self.address2 = MACAddress(stream.read(6))
         self.address3 = MACAddress(stream.read(6))
-        self.sequence_control = stream.u16()
+        
+        sequence_control = stream.u16()
+        self.sequence_id = sequence_control >> 4
+        self.fragment_id = sequence_control & 0xF
 
 
 class FrameType(typing.Protocol):
@@ -391,6 +412,7 @@ class FrameType(typing.Protocol):
 class AssociationRequest:
     target: MACAddress = MACAddress()
     source: MACAddress = MACAddress()
+    sequence_id: int = 0
 
     capability_information: int = 0
     listen_interval: int = 0
@@ -408,6 +430,7 @@ class AssociationRequest:
         
         self.target = header.address1
         self.source = header.address2
+        self.sequence_id = header.sequence_id
         
         self.capability_information = stream.u16()
         self.listen_interval = stream.u16()
@@ -422,6 +445,7 @@ class AssociationRequest:
         header.address1 = self.target
         header.address2 = self.source
         header.address3 = self.target
+        header.sequence_id = self.sequence_id
         stream.write(header.encode())
         
         stream.u16(self.capability_information)
@@ -435,6 +459,7 @@ class AssociationRequest:
 class AssociationResponse:
     target: MACAddress = MACAddress()
     source: MACAddress = MACAddress()
+    sequence_id: int = 0
 
     capability_information: int = 0
     status_code: int = 0
@@ -454,6 +479,7 @@ class AssociationResponse:
         
         self.target = header.address1
         self.source = header.address2
+        self.sequence_id = header.sequence_id
         
         self.capability_information = stream.u16()
         self.status_code = stream.u16()
@@ -470,6 +496,7 @@ class AssociationResponse:
         header.address1 = self.target
         header.address2 = self.source
         header.address3 = self.source
+        header.sequence_id = self.sequence_id
         stream.write(header.encode())
         
         stream.u16(self.capability_information)
@@ -483,6 +510,8 @@ class AssociationResponse:
 @dataclass
 class ProbeRequest:
     source: MACAddress = MACAddress()
+    sequence_id: int = 0
+
     elements: dict[int, bytes] = field(default_factory=dict)
     
     def decode(self, data: bytes) -> None:
@@ -496,6 +525,8 @@ class ProbeRequest:
             raise ValueError("Frame is not a probe request")
         
         self.source = header.address2
+        self.sequence_id = header.sequence_id
+
         self.elements = decode_elements(stream.readall())
     
     def encode(self) -> bytes:
@@ -507,6 +538,7 @@ class ProbeRequest:
         header.address1 = MACAddress("ff:ff:ff:ff:ff:ff")
         header.address2 = self.source
         header.address3 = MACAddress("ff:ff:ff:ff:ff:ff")
+        header.sequence_id = self.sequence_id
         stream.write(header.encode())
         
         stream.write(encode_elements(self.elements))
@@ -517,6 +549,7 @@ class ProbeRequest:
 class ProbeResponse:
     target: MACAddress = MACAddress()
     source: MACAddress = MACAddress()
+    sequence_id: int = 0
 
     timestamp: int = 0
     beacon_interval: int = 0
@@ -536,6 +569,8 @@ class ProbeResponse:
         
         self.target = header.address1
         self.source = header.address2
+        self.sequence_id = header.sequence_id
+
         self.timestamp = stream.u64()
         self.beacon_interval = stream.u16()
         self.capability_information = stream.u16()
@@ -550,6 +585,7 @@ class ProbeResponse:
         header.address1 = self.target
         header.address2 = self.source
         header.address3 = self.source
+        header.sequence_id = self.sequence_id
         stream.write(header.encode())
         
         stream.u64(self.timestamp)
@@ -562,6 +598,7 @@ class ProbeResponse:
 @dataclass
 class BeaconFrame:
     source: MACAddress = MACAddress()
+    sequence_id: int = 0
 
     timestamp: int = 0
     beacon_interval: int = 0
@@ -580,6 +617,8 @@ class BeaconFrame:
             raise ValueError("Frame is not a beacon frame")
         
         self.source = header.address2
+        self.sequence_id = header.sequence_id
+
         self.timestamp = stream.u64()
         self.beacon_interval = stream.u16()
         self.capability_information = stream.u16()
@@ -594,6 +633,7 @@ class BeaconFrame:
         header.address1 = MACAddress("ff:ff:ff:ff:ff:ff")
         header.address2 = self.source
         header.address3 = self.source
+        header.sequence_id = self.sequence_id
         stream.write(header.encode())
         
         stream.u64(self.timestamp)
@@ -608,6 +648,7 @@ class DisassociationFrame:
     target: MACAddress = MACAddress()
     source: MACAddress = MACAddress()
     bssid: MACAddress = MACAddress()
+    sequence_id: int = 0
 
     reason: int = 0
     elements: dict[int, bytes] = field(default_factory=dict)
@@ -625,6 +666,7 @@ class DisassociationFrame:
         self.target = header.address1
         self.source = header.address2
         self.bssid = header.address3
+        self.sequence_id = header.sequence_id
 
         self.reason = stream.u16()
         self.elements = decode_elements(stream.readall())
@@ -638,6 +680,7 @@ class DisassociationFrame:
         header.address1 = self.target
         header.address2 = self.source
         header.address3 = self.bssid
+        header.sequence_id = self.sequence_id
         stream.write(header.encode())
         
         stream.u16(self.reason)
@@ -650,6 +693,7 @@ class AuthenticationFrame:
     target: MACAddress = MACAddress()
     source: MACAddress = MACAddress()
     bssid: MACAddress = MACAddress()
+    sequence_id: int = 0
 
     algorithm: int = 0 
     sequence: int = 0
@@ -670,6 +714,7 @@ class AuthenticationFrame:
         self.target = header.address1
         self.source = header.address2
         self.bssid = header.address3
+        self.sequence_id = header.sequence_id
         
         self.algorithm = stream.u16()
         self.sequence = stream.u16()
@@ -686,6 +731,7 @@ class AuthenticationFrame:
         header.address1 = self.target
         header.address2 = self.source
         header.address3 = self.bssid
+        header.sequence_id = self.sequence_id
         stream.write(header.encode())
         
         stream.u16(self.algorithm)
@@ -700,6 +746,7 @@ class DeauthenticationFrame:
     target: MACAddress = MACAddress()
     source: MACAddress = MACAddress()
     bssid: MACAddress = MACAddress()
+    sequence_id: int = 0
 
     reason: int = 0
 
@@ -718,6 +765,7 @@ class DeauthenticationFrame:
         self.target = header.address1
         self.source = header.address2
         self.bssid = header.address3
+        self.sequence_id = header.sequence_id
 
         self.reason = stream.u16()
 
@@ -732,6 +780,7 @@ class DeauthenticationFrame:
         header.address1 = self.target
         header.address2 = self.source
         header.address3 = self.bssid
+        header.sequence_id = self.sequence_id
         stream.write(header.encode())
         
         stream.u16(self.reason)
@@ -742,6 +791,8 @@ class DeauthenticationFrame:
 @dataclass
 class ActionFrame:
     source: MACAddress = MACAddress()
+    sequence_id: int = 0
+
     action: bytes = b""
 
     def decode(self, data: bytes) -> None:
@@ -755,6 +806,7 @@ class ActionFrame:
             raise ValueError("Frame is not an action frame")
         
         self.source = header.address2
+        self.sequence_id = header.sequence_id
         
         self.action = stream.readall()
     
@@ -765,6 +817,7 @@ class ActionFrame:
         header.address1 = MACAddress("ff:ff:ff:ff:ff:ff")
         header.address2 = self.source
         header.address3 = MACAddress("ff:ff:ff:ff:ff:ff")
+        header.sequence_id = self.sequence_id
         
         stream = streams.StreamOut("<")
         stream.write(header.encode())
@@ -777,6 +830,7 @@ class DataFrame:
     target: MACAddress = MACAddress()
     source: MACAddress = MACAddress()
     bssid: MACAddress = MACAddress()
+    sequence_id: int = 0
 
     fromds: bool = False
     tods: bool = False
@@ -804,6 +858,7 @@ class DataFrame:
         self.target = header.address1
         self.source = header.address2
         self.bssid = header.address3
+        self.sequence_id = header.sequence_id
 
         # This is a bit ugly, but apparently the driver may decrypt the frame
         # without clearing the protected bit?
@@ -825,10 +880,11 @@ class DataFrame:
     def encode(self) -> bytes:
         header = MACHeader()
         header.type = IEEE80211_FTYPE_DATA
+        header.flags = self.tods | (self.fromds << 1) | (self.protected << 6)
         header.address1 = self.target
         header.address2 = self.source
         header.address3 = self.bssid
-        header.flags = self.tods | (self.fromds << 1) | (self.protected << 6)
+        header.sequence_id = self.sequence_id
         
         stream = streams.StreamOut("<")
         stream.write(header.encode())
@@ -1081,6 +1137,15 @@ class Interface:
             nl80211.NL80211_ATTR_WIPHY_FREQ: Channels[channel]
         }
         await self._wlan.request(nl80211.NL80211_CMD_SET_CHANNEL, attrs)
+
+    async def set_active(self, active: bool) -> None:
+        attrs = {
+            nl80211.NL80211_ATTR_IFINDEX: self.index(),
+            nl80211.NL80211_ATTR_MNTR_FLAGS: {
+                nl80211.NL80211_MNTR_FLAG_ACTIVE: active
+            }
+        }
+        await self._wlan.request(nl80211.NL80211_CMD_SET_INTERFACE, attrs)
     
     async def _register_frame(self, type: int, match: bytes = b"") -> None:
         """Tells the driver to start listening for a specific frame type."""
@@ -1200,6 +1265,329 @@ class Monitor(Interface):
             return None
 
 
+class MonitorAP:
+    """This class implements an access point on top of monitor mode."""
+
+    _monitor: Monitor
+
+    _ssid: str
+    _channel: int
+    _key: bytes | None
+    _max_stations: int
+
+    _stations_by_id: dict[int, MACAddress]
+    _stations_by_address: dict[MACAddress, int]
+    
+    _events: queue.Queue[EventType]
+
+    _data_frames: queue.Queue[EthernetFrame]
+    _data_nonce: int
+
+    _sequence_id: int
+    
+    def __init__(
+        self, monitor: Monitor, ssid: str, channel: int, key: bytes | None,
+        max_stations: int
+    ):
+        self._monitor = monitor
+
+        self._ssid = ssid
+        self._channel = channel
+        self._key = key
+        self._max_stations = max_stations
+        
+        self._stations_by_id = {}
+        self._stations_by_address = {}
+        
+        self._events = queue.create()
+
+        self._data_frames = queue.create()
+        self._data_nonce = 0
+
+        self._sequence_id = 0
+
+    async def next_event(self) -> EventType:
+        """Blocks until an interesting event occurs and returns it."""
+        return await self._events.get()
+    
+    @contextlib.asynccontextmanager
+    async def start(self) -> AsyncGenerator[None]:
+        """
+        Starts an access point on the underlying monitor mode interface. The
+        access point is stopped when the context manager exits.
+        """
+        async with util.create_nursery() as nursery:
+            nursery.start_soon(self._transmit_beacon_frames)
+            nursery.start_soon(self._receive_frames)
+            yield
+
+    async def send_frame(self, frame: FrameType) -> None:
+        """Transmits an IEEE 802.11 frame"""
+        self._sequence_id = (self._sequence_id + 1) & 0xFFF
+        frame.sequence_id = self._sequence_id
+        await self._monitor.send_frame(frame)
+
+    async def send_data(self, frame: EthernetFrame) -> None:
+        snap = SNAPHeader()
+        snap.protocol = frame.protocol
+        snap.payload = frame.payload
+
+        data = DataFrame()
+        data.target = frame.target
+        data.source = frame.source
+        data.bssid = self.address()
+        data.payload = snap.encode()
+        data.fromds = True
+        if self._key:
+            self._data_nonce += 1
+            data.encrypt(self._key, self._data_nonce, 1)
+        
+        await self.send_frame(data)
+
+    async def receive_data(self) -> EthernetFrame:
+        return await self._data_frames.get()
+
+    async def remove_station(self, addr: MACAddress) -> None:
+        """Removes the station with the given address from the network."""
+
+        if addr not in self._stations_by_address: return
+        
+        aid = self._stations_by_address.pop(addr)
+        del self._stations_by_id[aid]
+        
+        frame = DeauthenticationFrame()
+        frame.source = self.address()
+        frame.target = addr
+        frame.bssid = self.address()
+        frame.reason = WLAN_REASON_UNSPECIFIED
+        await self.send_frame(frame)
+
+    def address(self) -> MACAddress:
+        return self._monitor.address()
+
+    async def _transmit_beacon_frames(self) -> None:
+        """Transmits a beacon frame every 100 milliseconds."""
+        frame = self._create_beacon_frame()
+        while True:
+            await self.send_frame(frame)
+            await trio.sleep(.1)
+
+    async def _receive_frames(self) -> None:
+        while True:
+            frame = await self._monitor.recv_frame()
+            await self._process_frame(frame)
+
+    async def _process_frame(self, frame: FrameType) -> None:
+        """Handles an incoming IEEE 802.11 frame."""
+        
+        if isinstance(frame, ProbeRequest):
+            ssid = frame.elements.get(WLAN_EID_SSID)
+            if ssid == self._ssid.encode():
+                probe_response = self._create_probe_response(frame.source)
+                await self.send_frame(probe_response)
+        
+        elif isinstance(frame, AuthenticationFrame):
+            if frame.bssid == self.address():
+                if frame.algorithm == WLAN_AUTH_OPEN and frame.sequence == 1:
+                    auth_response = AuthenticationFrame()
+                    auth_response.source = self.address()
+                    auth_response.target = frame.source
+                    auth_response.bssid = self.address()
+                    auth_response.algorithm = WLAN_AUTH_OPEN
+                    auth_response.sequence = 2
+                    auth_response.status_code = WLAN_STATUS_SUCCESS
+                    await self.send_frame(auth_response)
+        
+        elif isinstance(frame, AssociationRequest):
+            ssid = frame.elements.get(WLAN_EID_SSID)
+            if ssid == self._ssid.encode():
+                response = await self._process_association_request(frame)
+                await self.send_frame(response)
+        
+        elif isinstance(frame, (DisassociationFrame, DeauthenticationFrame)):
+            await self._process_disassociation(frame)
+
+        elif isinstance(frame, DataFrame):
+            await self._process_data_frame(frame)
+    
+    async def _process_association_request(
+        self, frame: AssociationRequest
+    ) -> AssociationResponse:
+        """
+        Processes an incoming association request and returns the encoded
+        response.
+        """
+
+        # If the station is already connected, we simply return the existing
+        # association id.
+        if frame.source in self._stations_by_address:
+            aid = self._stations_by_address[frame.source]
+            return self._create_association_response(frame.source, aid)
+        
+        # Send an error if the network is full.
+        if len(self._stations_by_id) >= self._max_stations:
+            return self._create_association_error(
+                frame.source, WLAN_STATUS_AP_UNABLE_TO_HANDLE_NEW_STA
+            )
+        
+        if WLAN_EID_SUPP_RATES not in frame.elements:
+            return self._create_association_error(
+                frame.source, WLAN_STATUS_ASSOC_DENIED_UNSPEC
+            )
+        
+        # Allocate an association id and add the station to our internal table.
+        aid = 1
+        while aid in self._stations_by_id:
+            aid += 1
+        
+        self._stations_by_id[aid] = frame.source
+        self._stations_by_address[frame.source] = aid
+        
+        await self._events.put(AssociationEvent(frame.source))
+        return self._create_association_response(frame.source, aid)
+    
+    async def _process_disassociation(
+        self, frame: DisassociationFrame | DeauthenticationFrame
+    ) -> None:
+        """Processes an incoming disassociation or deauthentication frame."""
+
+        if frame.source not in self._stations_by_address: return
+        
+        aid = self._stations_by_address.pop(frame.source)
+        del self._stations_by_id[aid]
+        
+        await self._events.put(DisassociationEvent(frame.source))
+
+    async def _process_data_frame(self, frame: DataFrame) -> None:
+        if frame.source not in self._stations_by_address:
+            return
+        
+        if frame.target != self.address() and \
+            frame.target != MACAddress("ff:ff:ff:ff:ff:ff"):
+            return
+
+        if frame.protected:
+            if self._key is None:
+                logger.warning(
+                    "Received protected data frame but no key was registered"
+                )
+                return
+            
+            frame.decrypt(self._key)
+
+        snap = SNAPHeader()
+        snap.decode(frame.payload)
+        
+        ethernet = EthernetFrame()
+        ethernet.source = frame.source
+        ethernet.target = frame.target
+        ethernet.protocol = snap.protocol
+        ethernet.payload = snap.payload
+        
+        await self._data_frames.put(ethernet)
+
+    def _create_beacon_frame(self) -> BeaconFrame:
+        """Creates a beacon frame for transmission."""
+
+        supported_rates = [0x82, 0x84, 0x8B, 0x96, 0x24, 0x30, 0x48, 0x6C]
+        
+        ssid = SSIDElement("\x00" * 32)
+        rates = SuppRatesElement(supported_rates)
+        dsparams = DSParamsElement(self._channel)
+        tim = TIMElement(2, 3, 0, 0)
+
+        rsn = RSNElement(
+            group_cipher_suite = WLAN_CIPHER_SUITE_CCMP,
+            pairwise_cipher_suites = [WLAN_CIPHER_SUITE_CCMP],
+            akm_suites = [WLAN_AKM_SUITE_PSK],
+            capabilities = 12
+        )
+
+        frame = BeaconFrame()
+        frame.source = self.address()
+        frame.beacon_interval = 100
+        frame.capability_information = 0x501
+        frame.elements = {
+            WLAN_EID_SSID: ssid.encode(),
+            WLAN_EID_SUPP_RATES: rates.encode(),
+            WLAN_EID_DS_PARAMS: dsparams.encode(),
+            WLAN_EID_TIM: tim.encode()
+        }
+        if self._key is not None:
+            frame.capability_information |= 0x10
+            frame.elements[WLAN_EID_RSN] = rsn.encode()
+        return frame
+    
+    def _create_probe_response(self, address: MACAddress) -> ProbeResponse:
+        """Creates a probe response frame for the given address."""
+
+        supported_rates = [0x82, 0x84, 0x8B, 0x96, 0x24, 0x30, 0x48, 0x6C]
+
+        ssid = SSIDElement(self._ssid)
+        rates = SuppRatesElement(supported_rates)
+        dsparams = DSParamsElement(self._channel)
+
+        rsn = RSNElement(
+            group_cipher_suite = WLAN_CIPHER_SUITE_CCMP,
+            pairwise_cipher_suites = [WLAN_CIPHER_SUITE_CCMP],
+            akm_suites = [WLAN_AKM_SUITE_PSK],
+            capabilities = 12
+        )
+        
+        response = ProbeResponse()
+        response.source = self.address()
+        response.target = address
+        response.beacon_interval = 100
+        response.capability_information = 0x501
+        response.elements = {
+            WLAN_EID_SSID: ssid.encode(),
+            WLAN_EID_SUPP_RATES: rates.encode(),
+            WLAN_EID_DS_PARAMS: dsparams.encode(),
+        }
+        if self._key is not None:
+            response.capability_information |= 0x10
+            response.elements[WLAN_EID_RSN] = rsn.encode()
+        return response
+    
+    def _create_association_response(
+        self, address: MACAddress, aid: int
+    ) -> AssociationResponse:
+        """
+        Creates an association response frame with the given address
+        and association id. The association response indicates success.
+        """
+
+        supported_rates = [0x82, 0x84, 0x8B, 0x96, 0x24, 0x30, 0x48, 0x6C]
+        
+        rates = SuppRatesElement(supported_rates)
+        
+        response = AssociationResponse()
+        response.source = self.address()
+        response.target = address
+        response.capability_information = 0x411
+        response.status_code = WLAN_STATUS_SUCCESS
+        response.aid = aid | 0xC000
+        response.elements = {
+            WLAN_EID_SUPP_RATES: rates.encode()
+        }
+        return response
+    
+    def _create_association_error(
+        self, address: MACAddress, error: int
+    ) -> AssociationResponse:
+        """
+        Creates an association response frame with the given address
+        for an error situation.
+        """
+        response = AssociationResponse()
+        response.source = self.address()
+        response.target = address
+        response.capability_information = 0x411
+        response.status_code = error
+        response.aid = 0
+        return response
+
+
 class Station(Interface):
     """Represents an interface in station mode."""
 
@@ -1242,7 +1630,7 @@ class Station(Interface):
         await self._wlan.request(nl80211.NL80211_CMD_CONTROL_PORT_FRAME, attrs)
     
     @contextlib.asynccontextmanager
-    async def connect(self) -> AsyncIterator[None]:
+    async def connect(self) -> AsyncGenerator[None]:
         """
         Connects the interface to the network. Blocks until the connection is
         complete, or raises an exception if the connection fails. Disconnects
@@ -1286,7 +1674,7 @@ class Station(Interface):
         await self._wlan.request(nl80211.NL80211_CMD_NEW_KEY, attrs)
     
     @contextlib.asynccontextmanager
-    async def _connect_network(self) -> AsyncIterator[None]:
+    async def _connect_network(self) -> AsyncGenerator[None]:
         """
         Joins the network through the underlying driver. Blocks until the
         network has been joined. Raises an exception if the network could not be
@@ -1389,397 +1777,6 @@ class Station(Interface):
         await self._wlan.request(nl80211.NL80211_CMD_SET_STATION, attrs)
 
 
-class AccessPoint(Interface):
-    """This class represents a access point interface."""
-
-    _interface: Interface
-
-    _ssid: str
-    _channel: int
-    _key: bytes | None
-    _max_stations: int
-
-    _stations_by_id: dict[int, MACAddress]
-    _stations_by_address: dict[MACAddress, int]
-    
-    _events: queue.Queue[EventType]
-    
-    def __init__(
-        self, wlan: nl80211.NL80211, router: route.RouteController, ifname: str,
-        index: int, address: MACAddress, ssid: str, channel: int,
-        key: bytes | None, max_stations: int
-    ):
-        super().__init__(wlan, router, ifname, index, address)
-
-        self._ssid = ssid
-        self._channel = channel
-        self._key = key
-        self._max_stations = max_stations
-        
-        self._stations_by_id = {}
-        self._stations_by_address = {}
-        
-        self._events = queue.create()
-
-    async def next_event(self):
-        """Blocks until an interesting event occurs and returns it."""
-        return await self._events.get()
-    
-    @contextlib.asynccontextmanager
-    async def create(self) -> AsyncIterator[None]:
-        """
-        Starts an access point on the underlying interface. The access point is
-        stopped when the context manager exits.
-        """
-        await self.up()
-        self.disable_ipv6()
-        async with self._start_ap():
-            for type in [
-                IEEE80211_STYPE_ASSOC_REQ,
-                IEEE80211_STYPE_PROBE_REQ,
-                IEEE80211_STYPE_DISASSOC,
-                IEEE80211_STYPE_AUTH,
-                IEEE80211_STYPE_DEAUTH
-            ]:
-                await self._register_frame(type)
-            
-            async with util.background_task(self._process_messages):
-                yield
-    
-    async def send_custom_frame(self, addr: MACAddress, frame: bytes) -> None:
-        """Transmits a control port frame through the underlying interface."""
-        attrs = {
-            nl80211.NL80211_ATTR_IFINDEX: self.index(),
-            nl80211.NL80211_ATTR_FRAME: frame,
-            nl80211.NL80211_ATTR_MAC: bytes(addr),
-            nl80211.NL80211_ATTR_CONTROL_PORT_ETHERTYPE:
-                struct.pack("H", ETH_P_OUI)
-        }
-        await self._wlan.request(nl80211.NL80211_CMD_CONTROL_PORT_FRAME, attrs)
-    
-    async def remove_station(self, addr: MACAddress) -> None:
-        """Removes the station with the given address from the network."""
-
-        if addr not in self._stations_by_address: return
-        
-        aid = self._stations_by_address.pop(addr)
-        del self._stations_by_id[aid]
-        
-        frame = DeauthenticationFrame()
-        frame.source = self.address()
-        frame.target = addr
-        frame.bssid = self.address()
-        frame.reason = WLAN_REASON_UNSPECIFIED
-        await self.send_frame(frame.encode())
-        
-        attrs = {
-            nl80211.NL80211_ATTR_IFINDEX: self.index(),
-            nl80211.NL80211_ATTR_MAC: addr.encode(),
-            nl80211.NL80211_ATTR_REASON_CODE: WLAN_REASON_UNSPECIFIED
-        }
-        await self._wlan.request(nl80211.NL80211_CMD_DEL_STATION, attrs)
-    
-    def _create_beacon_head(self) -> bytes:
-        """Creates and encodes a beacon frame for transmission."""
-        frame = BeaconFrame()
-        frame.source = self.address()
-        frame.beacon_interval = 100
-        frame.capability_information = 0x511
-        return frame.encode()
-    
-    def _create_beacon_tail(self) -> bytes:
-        """Returns the beacon tail."""
-        return b"" # No beacon tail for now
-    
-    def _create_probe_response(self, address: MACAddress) -> bytes:
-        """Creates and encodes a probe response frame for the given address."""
-
-        supported_rates = [0x82, 0x84, 0x8B, 0x96, 0x24, 0x30, 0x48, 0x6C]
-
-        ssid = SSIDElement(self._ssid)
-        rates = SuppRatesElement(supported_rates)
-        dsparams = DSParamsElement(self._channel)
-
-        rsn = RSNElement(
-            group_cipher_suite = WLAN_CIPHER_SUITE_CCMP,
-            pairwise_cipher_suites = [WLAN_CIPHER_SUITE_CCMP],
-            akm_suites = [WLAN_AKM_SUITE_PSK],
-            capabilities = 12
-        )
-        
-        response = ProbeResponse()
-        response.source = self.address()
-        response.target = address
-        response.beacon_interval = 100
-        response.capability_information = 0x501
-        response.elements = {
-            WLAN_EID_SSID: ssid.encode(),
-            WLAN_EID_SUPP_RATES: rates.encode(),
-            WLAN_EID_DS_PARAMS: dsparams.encode(),
-        }
-        if self._key is not None:
-            response.capability_information |= 0x10
-            response.elements[WLAN_EID_RSN] = rsn.encode()
-        return response.encode()
-    
-    def _create_association_response(
-        self, address: MACAddress, aid: int
-    ) -> bytes:
-        """
-        Creates and encodes an association response frame with the given address
-        and association id. The association response indicates success.
-        """
-
-        supported_rates = [0x82, 0x84, 0x8B, 0x96, 0x24, 0x30, 0x48, 0x6C]
-        
-        rates = SuppRatesElement(supported_rates)
-        
-        response = AssociationResponse()
-        response.source = self.address()
-        response.target = address
-        response.capability_information = 0x411
-        response.status_code = WLAN_STATUS_SUCCESS
-        response.aid = aid | 0xC000
-        response.elements = {
-            WLAN_EID_SUPP_RATES: rates.encode()
-        }
-        return response.encode()
-    
-    def _create_association_error(
-        self, address: MACAddress, error: int
-    ) -> bytes:
-        """
-        Creates and encodes an association response frame with the given address
-        for an error situation.
-        """
-        response = AssociationResponse()
-        response.source = self.address()
-        response.target = address
-        response.capability_information = 0x411
-        response.status_code = error
-        response.aid = 0
-        return response.encode()
-    
-    def _parse_management_frame(self, data: bytes) -> FrameType:
-        header = MACHeader()
-        header.decode(data)
-
-        frame = FrameTypes[header.subtype]()
-        frame.decode(data)
-        return frame
-    
-    @contextlib.asynccontextmanager
-    async def _start_ap(self) -> AsyncIterator[None]:
-        """
-        Sends the nl80211 messages that are required to create an IBSS.
-        The IBSS is destroyed when the context manager exits.
-        """
-        beacon_head = self._create_beacon_head()
-        beacon_tail = self._create_beacon_tail()
-        
-        attrs = {
-            nl80211.NL80211_ATTR_IFINDEX: self.index(),
-            nl80211.NL80211_ATTR_SSID: self._ssid.encode(),
-            nl80211.NL80211_ATTR_MAC: self.address().encode(),
-            nl80211.NL80211_ATTR_WIPHY_FREQ: Channels[self._channel],
-            nl80211.NL80211_ATTR_BEACON_HEAD: beacon_head,
-            nl80211.NL80211_ATTR_BEACON_TAIL: beacon_tail,
-            nl80211.NL80211_ATTR_BEACON_INTERVAL: 100,
-            nl80211.NL80211_ATTR_DTIM_PERIOD: 3,
-            nl80211.NL80211_ATTR_HIDDEN_SSID:
-                nl80211.NL80211_HIDDEN_SSID_ZERO_CONTENTS,
-            nl80211.NL80211_ATTR_CONTROL_PORT: True,
-            nl80211.NL80211_ATTR_CONTROL_PORT_ETHERTYPE:
-                struct.pack("H", ETH_P_OUI),
-            nl80211.NL80211_ATTR_CONTROL_PORT_OVER_NL80211: True,
-            nl80211.NL80211_ATTR_SOCKET_OWNER: True
-        }
-
-        await self._wlan.request(nl80211.NL80211_CMD_START_AP, attrs)
-
-        # Wait until the AP is ready
-        while True:
-            message = await self._wlan.receive()
-            if message.type == nl80211.NL80211_CMD_START_AP:
-                break
-
-        if self._key is not None:
-            attrs = {
-                nl80211.NL80211_ATTR_IFINDEX: self.index(),
-                nl80211.NL80211_ATTR_KEY: {
-                    nl80211.NL80211_KEY_IDX: 1,
-                    nl80211.NL80211_KEY_DATA: self._key,
-                    nl80211.NL80211_KEY_CIPHER: WLAN_CIPHER_SUITE_CCMP
-                }
-            }
-            await self._wlan.request(nl80211.NL80211_CMD_NEW_KEY, attrs)
-
-            attrs = {
-                nl80211.NL80211_ATTR_IFINDEX: self.index(),
-                nl80211.NL80211_ATTR_KEY: {
-                    nl80211.NL80211_KEY_IDX: 1,
-                    nl80211.NL80211_KEY_DEFAULT: True,
-                    nl80211.NL80211_KEY_DEFAULT_TYPES: {
-                        nl80211.NL80211_KEY_DEFAULT_TYPE_MULTICAST: True
-                    }
-                }
-            }
-            await self._wlan.request(nl80211.NL80211_CMD_SET_KEY, attrs)
-        
-        try:
-            yield
-        finally:
-            attrs = {nl80211.NL80211_ATTR_IFINDEX: self.index()}
-            await self._wlan.request(nl80211.NL80211_CMD_STOP_AP, attrs)
-    
-    async def _process_messages(self):
-        """
-        Processes messages from the underlying driver and adds interesting
-        events to the event queue.
-        """
-        while True:
-            message = await self._wlan.receive()
-            if message.type == nl80211.NL80211_CMD_FRAME:
-                data = message.attributes[nl80211.NL80211_ATTR_FRAME]
-                try:
-                    frame = self._parse_management_frame(data)
-                except Exception:
-                    continue # Ignore invalid frames
-                await self._process_frame(frame)
-            elif message.type == nl80211.NL80211_CMD_CONTROL_PORT_FRAME:
-                address = MACAddress(message.attributes[nl80211.NL80211_ATTR_MAC])
-                data = message.attributes[nl80211.NL80211_ATTR_FRAME]
-                await self._events.put(CustomFrameEvent(address, data))
-    
-    async def _process_frame(self, frame: FrameType) -> None:
-        """
-        Handles an incoming management frame.
-        """
-        if isinstance(frame, ProbeRequest):
-            ssid = frame.elements.get(WLAN_EID_SSID)
-            if ssid == self._ssid.encode():
-                probe_response = self._create_probe_response(frame.source)
-                await self.send_frame(probe_response)
-        elif isinstance(frame, AuthenticationFrame):
-            if frame.bssid == self.address():
-                if frame.algorithm == WLAN_AUTH_OPEN and frame.sequence == 1:
-                    auth_response = AuthenticationFrame()
-                    auth_response.source = self.address()
-                    auth_response.target = frame.source
-                    auth_response.bssid = self.address()
-                    auth_response.algorithm = WLAN_AUTH_OPEN
-                    auth_response.sequence = 2
-                    auth_response.status_code = WLAN_STATUS_SUCCESS
-                    await self.send_frame(auth_response.encode())
-        elif isinstance(frame, AssociationRequest):
-            ssid = frame.elements.get(WLAN_EID_SSID)
-            if ssid == self._ssid.encode():
-                response = await self._process_association_request(frame)
-                await self.send_frame(response)
-        elif isinstance(frame, (DisassociationFrame, DeauthenticationFrame)):
-            await self._process_disassociation(frame)
-    
-    async def _process_association_request(
-        self, frame: AssociationRequest
-    ) -> bytes:
-        """
-        Processes an incoming association request and returns the encoded
-        response.
-        """
-
-        # If the station is already connected, we simply return the existing
-        # association id.
-        if frame.source in self._stations_by_address:
-            aid = self._stations_by_address[frame.source]
-            return self._create_association_response(frame.source, aid)
-        
-        # Send an error if the network is full.
-        if len(self._stations_by_id) >= self._max_stations:
-            return self._create_association_error(
-                frame.source, WLAN_STATUS_AP_UNABLE_TO_HANDLE_NEW_STA
-            )
-        
-        if WLAN_EID_SUPP_RATES not in frame.elements:
-            return self._create_association_error(
-                frame.source, WLAN_STATUS_ASSOC_DENIED_UNSPEC
-            )
-        
-        # Allocate an association id and add the station to our internal table.
-        aid = 1
-        while aid in self._stations_by_id:
-            aid += 1
-        
-        self._stations_by_id[aid] = frame.source
-        self._stations_by_address[frame.source] = aid
-        
-        attrs = {
-            nl80211.NL80211_ATTR_IFINDEX: self.index(),
-            nl80211.NL80211_ATTR_MAC: bytes(frame.source),
-            nl80211.NL80211_ATTR_STA_LISTEN_INTERVAL: frame.listen_interval,
-            nl80211.NL80211_ATTR_STA_SUPPORTED_RATES:
-                frame.elements[WLAN_EID_SUPP_RATES],
-            nl80211.NL80211_ATTR_STA_CAPABILITY: frame.capability_information,
-            nl80211.NL80211_ATTR_STA_AID: aid
-        }
-        if WLAN_EID_EXT_CAPABILITY in frame.elements:
-            attrs[nl80211.NL80211_ATTR_STA_EXT_CAPABILITY] = \
-                frame.elements[WLAN_EID_EXT_CAPABILITY]
-        if WLAN_EID_HT_CAPABILITY in frame.elements:
-            attrs[nl80211.NL80211_ATTR_HT_CAPABILITY] = \
-                frame.elements[WLAN_EID_HT_CAPABILITY]
-        if WLAN_EID_SUPPORTED_CHANNELS in frame.elements:
-            attrs[nl80211.NL80211_ATTR_STA_SUPPORTED_CHANNELS] = \
-                frame.elements[WLAN_EID_SUPPORTED_CHANNELS]
-        await self._wlan.request(nl80211.NL80211_CMD_NEW_STATION, attrs)
-        
-        if self._key is not None:
-            attrs = {
-                nl80211.NL80211_ATTR_IFINDEX: self.index(),
-                nl80211.NL80211_ATTR_MAC: frame.source.encode(),
-                nl80211.NL80211_ATTR_KEY: {
-                    nl80211.NL80211_KEY_IDX: 0,
-                    nl80211.NL80211_KEY_DATA: self._key,
-                    nl80211.NL80211_KEY_CIPHER: WLAN_CIPHER_SUITE_CCMP
-                }
-            }
-            await self._wlan.request(nl80211.NL80211_CMD_NEW_KEY, attrs)
-        
-        await self._events.put(AssociationEvent(frame.source))
-        return self._create_association_response(frame.source, aid)
-    
-    async def _process_disassociation(
-        self, frame: DisassociationFrame | DeauthenticationFrame
-    ) -> None:
-        """Processes an incoming disassociation or deauthentication frame."""
-
-        if frame.source not in self._stations_by_address: return
-        
-        aid = self._stations_by_address.pop(frame.source)
-        del self._stations_by_id[aid]
-
-        subtype = IEEE80211_STYPE_DISASSOC
-        if isinstance(frame, DeauthenticationFrame):
-            subtype = IEEE80211_STYPE_DEAUTH
-
-        attrs = {
-            nl80211.NL80211_ATTR_IFINDEX: self.index(),
-            nl80211.NL80211_ATTR_MAC: frame.source.encode(),
-            nl80211.NL80211_ATTR_MGMT_SUBTYPE: subtype,
-            nl80211.NL80211_ATTR_REASON_CODE: frame.reason
-        }
-        await self._wlan.request(nl80211.NL80211_CMD_DEL_STATION, attrs)
-        
-        await self._events.put(DisassociationEvent(frame.source))
-    
-    async def send_frame(self, data: bytes) -> None:
-        """Sends a management frame."""
-        attrs = {
-            nl80211.NL80211_ATTR_IFINDEX: self.index(),
-            nl80211.NL80211_ATTR_FRAME: data
-        }
-        await self._wlan.request(nl80211.NL80211_CMD_FRAME, attrs)
-
-
 class Tap(Interface):
     _file: trio._file_io.AsyncIOWrapper
 
@@ -1811,33 +1808,55 @@ class Factory:
     
     @contextlib.asynccontextmanager
     async def create_monitor(
-        self, phyname: str, ifname: str, channel: int | None = None
-    ) -> AsyncIterator[Monitor]:
+        self, phyname: str, ifname: str, channel: int | None = None,
+        active: bool = False
+    ) -> AsyncGenerator[Monitor]:
         """
         Creates an interface in monitor mode on the given phy with the given
         name. If a channel is provided, the phy is immediately switched to the
         given channel.
         """
         flags = {
-            nl80211.NL80211_ATTR_MNTR_FLAGS: {
-                nl80211.NL80211_MNTR_FLAG_OTHER_BSS: True
-            }
+            nl80211.NL80211_MNTR_FLAG_OTHER_BSS: True
+        }
+        if active:
+            flags[nl80211.NL80211_MNTR_FLAG_ACTIVE] = True
+        
+        extra = {
+            nl80211.NL80211_ATTR_MNTR_FLAGS: flags
         }
         async with self._create_interface(
-            phyname, ifname, nl80211.NL80211_IFTYPE_MONITOR, flags
+            phyname, ifname, nl80211.NL80211_IFTYPE_MONITOR, extra
         ) as attributes:
             index = attributes[nl80211.NL80211_ATTR_IFINDEX]
             address = MACAddress(attributes[nl80211.NL80211_ATTR_MAC])
             
             monitor = Monitor(self._wlan, self._router, ifname, index, address)
             await monitor.activate()
+            if channel is not None:
+                await monitor.set_channel(channel)
             yield monitor
-    
+
+    @contextlib.asynccontextmanager
+    async def create_monitor_ap(
+        self, phyname: str, ifname: str, ifname_active: str, ssid: str,
+        channel: int, key: bytes | None, max_stations: int
+    ) -> AsyncGenerator[MonitorAP]:
+        """
+        Creates an interface in monitor mode that also acts like an access
+        point.
+        """
+        async with self.create_monitor(phyname, ifname, channel) as monitor:
+            async with self.create_monitor(phyname, ifname_active, active=True):
+                ap = MonitorAP(monitor, ssid, channel, key, max_stations)
+                async with ap.start():
+                    yield ap
+        
     @contextlib.asynccontextmanager
     async def connect_network(
         self, phyname: str, ifname: str, ssid: str, channel: int,
         key: bytes | None
-    ) -> AsyncIterator[Station]:
+    ) -> AsyncGenerator[Station]:
         """
         Creates an interface in station mode and connects it to the given SSID.
         """
@@ -1855,30 +1874,9 @@ class Factory:
                 yield sta
     
     @contextlib.asynccontextmanager
-    async def create_ap(
-        self, phyname: str, ifname: str, ssid: str, channel: int,
-        key: bytes | None, max_stations: int
-    ) -> AsyncIterator[AccessPoint]:
-        """
-        Creates an interface in IBSS mode with the given SSID.
-        """
-        async with self._create_interface(
-            phyname, ifname, nl80211.NL80211_IFTYPE_AP
-        ) as attributes:
-            index = attributes[nl80211.NL80211_ATTR_IFINDEX]
-            address = MACAddress(attributes[nl80211.NL80211_ATTR_MAC])
-
-            ibss = AccessPoint(
-                self._wlan, self._router, ifname, index, address, ssid, channel,
-                key, max_stations
-            )
-            async with ibss.create():
-                yield ibss
-    
-    @contextlib.asynccontextmanager
     async def create_tap(
         self, ifname: str, address: MACAddress
-    ) -> AsyncIterator[Tap]:
+    ) -> AsyncGenerator[Tap]:
         file = await trio.open_file("/dev/net/tun", "rb+", buffering=0)
         async with file:
             request = struct.pack("16sH", ifname.encode(), IFF_TAP | IFF_NO_PI)
@@ -1893,7 +1891,7 @@ class Factory:
     async def _create_interface(
         self, phyname: str, ifname: str, type: int,
         extra: dict[int, typing.Any] = {}
-    ) -> AsyncIterator[dict[int, typing.Any]]:
+    ) -> AsyncGenerator[dict[int, typing.Any]]:
         """
         Creates an interface on the given phy, with the given name, type and
         additional attributes.
@@ -1934,7 +1932,7 @@ class Factory:
 
 
 @contextlib.asynccontextmanager
-async def create_factory() -> AsyncIterator[Factory]:
+async def create_factory() -> AsyncGenerator[Factory]:
     """
     Establishes an nl80211 connection with the kernel and returns a factory for
     wireless interfaces.

@@ -6,7 +6,7 @@ wireless communication between Nintendo Switch consoles.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 
 from Crypto.Cipher import AES
 
@@ -1073,10 +1073,9 @@ class ConnectNetworkParam:
 @dataclass
 class CreateNetworkParam:
     ifname: str = "ldn"
-    ifname_monitor: str = "ldn-mon"
+    ifname_active: str = "ldn-ack"
     ifname_tap: str = "ldn-tap"
     phyname: str = "phy0"
-    phyname_monitor: str = "phy0"
 
     local_communication_id: int = 0
     scene_id: int = 0
@@ -1303,7 +1302,7 @@ class STANetwork:
         return await self._events.get()
     
     @contextlib.asynccontextmanager
-    async def start(self) -> AsyncIterator[None]:
+    async def start(self) -> AsyncGenerator[None]:
         await self._authenticate()
         async with util.background_task(self._process_events):
             await self._initialize_network()
@@ -1482,14 +1481,11 @@ class STANetwork:
 
 
 class APNetwork:
-    _interface: wlan.AccessPoint
-    _monitor: wlan.Monitor
+    _interface: wlan.MonitorAP
     _tap: wlan.Tap
 
     _param: CreateNetworkParam
     _key_derivation: KeyDerivation
-    _key: bytes | None
-    _data_nonce: int
 
     _accept_filter: list[MACAddress]
     _enable_challenge: bool
@@ -1505,22 +1501,18 @@ class APNetwork:
     _events: queue.Queue[EventType]
 
     def __init__(
-        self, access_point: wlan.AccessPoint, monitor: wlan.Monitor,
-        tap: wlan.Tap, param: CreateNetworkParam,
-        key_derivation: KeyDerivation, key: bytes | None
+        self, access_point: wlan.MonitorAP, tap: wlan.Tap,
+        param: CreateNetworkParam, key_derivation: KeyDerivation
     ):
         assert param.channel is not None
         assert param.ssid is not None
         assert param.server_random is not None
 
         self._interface = access_point
-        self._monitor = monitor
         self._tap = tap
 
         self._param = param
         self._key_derivation = key_derivation
-        self._key = key
-        self._data_nonce = 0
         
         self._accept_filter = param.accept_filter
         self._enable_challenge = param.enable_challenge
@@ -1593,7 +1585,7 @@ class APNetwork:
         if participant.connected:
             frame = DisconnectFrame()
             frame.reason = DISCONNECT_STATION_REJECTED_BY_HOST
-            await self._interface.send_custom_frame(
+            await self._send_control_frame(
                 participant.mac_address, frame.encode()
             )
             await self._interface.remove_station(participant.mac_address)
@@ -1603,7 +1595,7 @@ class APNetwork:
         return await self._events.get()
     
     @contextlib.asynccontextmanager
-    async def start(self) -> AsyncIterator[None]:
+    async def start(self) -> AsyncGenerator[None]:
         await self._initialize_network()
         async with util.create_nursery() as nursery:
             nursery.start_soon(self._process_events)
@@ -1700,27 +1692,26 @@ class APNetwork:
     async def _process_events(self) -> None:
         while True:
             event = await self._interface.next_event()
-            if isinstance(event, wlan.CustomFrameEvent):
-                response = await self._process_authentication_event(event)
-                await self._interface.send_custom_frame(
-                    event.address, response.encode()
-                )
-            elif isinstance(event, wlan.DisassociationEvent):
+            if isinstance(event, wlan.DisassociationEvent):
                 await self._process_disassociation(event.address)
+
+    async def _process_control_frame(self, frame: wlan.EthernetFrame) -> None:
+        response = await self._process_authentication_event(frame)
+        await self._send_control_frame(frame.source, response.encode())
     
     async def _process_authentication_event(
-        self, event: wlan.CustomFrameEvent
+        self, ethernet: wlan.EthernetFrame
     ) -> AuthenticationFrame:
         frame = AuthenticationFrame(self._key_derivation, self._param.protocol)
         try:
-            frame.decode(event.data)
+            frame.decode(ethernet.payload)
         except Exception:
             logger.warning("Failed to parse authentication request")
             return self._make_authentication_response(
                 AUTH_MALFORMED_REQUEST, self._network.version, bytes(16)
             )
         
-        error = self._check_authentication_request(event.address, frame)
+        error = self._check_authentication_request(ethernet.source, frame)
         if error != AUTH_SUCCESS:
             return self._make_authentication_response(
                 error, self._network.version, frame.client_random
@@ -1738,7 +1729,7 @@ class APNetwork:
             )
         
         await self._register_participant(
-            event.address, frame.payload.username, frame.payload.app_version,
+            ethernet.source, frame.payload.username, frame.payload.app_version,
             frame.payload.platform
         )
         
@@ -1769,7 +1760,7 @@ class APNetwork:
         
         self._update_nonce()
         
-        await self._interface.add_neighbor(
+        await self._tap.add_neighbor(
             participant.ip_address, participant.mac_address
         )
         
@@ -1789,7 +1780,7 @@ class APNetwork:
 
         self._update_nonce()
         
-        await self._interface.remove_neighbor(
+        await self._tap.remove_neighbor(
             participant.ip_address, participant.mac_address
         )
         
@@ -1806,7 +1797,7 @@ class APNetwork:
             if participant.connected:
                 frame = DisconnectFrame()
                 frame.reason = DISCONNECT_NETWORK_DESTROYED
-                await self._interface.send_custom_frame(
+                await self._send_control_frame(
                     participant.mac_address, frame.encode()
                 )
     
@@ -1822,16 +1813,25 @@ class APNetwork:
         action.source = self._interface.address()
         action.action = frame.encode()
 
-        await self._monitor.send_frame(action)
+        await self._interface.send_frame(action)
+
+    async def _send_control_frame(
+        self, target: wlan.MACAddress, data: bytes
+    ) -> None:
+        frame = wlan.EthernetFrame()
+        frame.target = target
+        frame.source = self._interface.address()
+        frame.protocol = wlan.ETH_P_OUI
+        frame.payload = data
+        await self._interface.send_data(frame)
     
     async def _receive_data_frames(self) -> None:
         while True:
-            frame = await self._monitor.recv_frame()
-            if isinstance(frame, wlan.DataFrame):
-                try:
-                    await self._process_data_frame(frame)
-                except Exception:
-                    pass # Ignore invalid frames
+            frame = await self._interface.receive_data()
+            if frame.protocol == wlan.ETH_P_OUI:
+                await self._process_control_frame(frame)
+            else:
+                await self._tap.write(frame.encode())
     
     async def _transmit_data_frames(self) -> None:
         while True:
@@ -1840,51 +1840,7 @@ class APNetwork:
             ethernet = wlan.EthernetFrame()
             ethernet.decode(data)
 
-            snap = wlan.SNAPHeader()
-            snap.protocol = ethernet.protocol
-            snap.payload = ethernet.payload
-
-            await self._send_data_frame(snap.encode())
-    
-    async def _process_data_frame(self, frame: wlan.DataFrame) -> None:
-        if frame.protected:
-            if self._key is None:
-                logger.warning(
-                    "Received protected data frame but no key was registered"
-                )
-                return
-            
-            frame.decrypt(self._key)
-        
-        if frame.source not in self._peers:
-            return
-        
-        if frame.target != self._monitor.address() and \
-           frame.target != MACAddress("ff:ff:ff:ff:ff:ff"):
-            return
-        
-        snap = wlan.SNAPHeader()
-        snap.decode(frame.payload)
-        
-        header = wlan.EthernetFrame()
-        header.source = frame.source
-        header.target = frame.target
-        header.protocol = snap.protocol
-        header.payload = snap.payload
-        await self._tap.write(header.encode())
-    
-    async def _send_data_frame(self, data: bytes) -> None:
-        # We are simply sending all frames to the broadcast address here.
-        frame = wlan.DataFrame()
-        frame.target = MACAddress("ff:ff:ff:ff:ff:ff")
-        frame.source = self._monitor.address()
-        frame.bssid = self._monitor.address()
-        frame.payload = data
-        frame.fromds = True
-        if self._key:
-            self._data_nonce += 1
-            frame.encrypt(self._key, self._data_nonce, 1)
-        await self._monitor.send_frame(frame)
+            await self._interface.send_data(ethernet)
 
 
 async def scan(
@@ -1916,7 +1872,7 @@ async def scan(
 
 
 @contextlib.asynccontextmanager
-async def connect(param: ConnectNetworkParam) -> AsyncIterator[STANetwork]:
+async def connect(param: ConnectNetworkParam) -> AsyncGenerator[STANetwork]:
     """Joins a nearby LDN network."""
 
     param = copy.copy(param)
@@ -1950,7 +1906,7 @@ async def connect(param: ConnectNetworkParam) -> AsyncIterator[STANetwork]:
 
 
 @contextlib.asynccontextmanager
-async def create_network(param: CreateNetworkParam) -> AsyncIterator[APNetwork]:
+async def create_network(param: CreateNetworkParam) -> AsyncGenerator[APNetwork]:
     """Starts hosting an LDN network."""
 
     param = copy.copy(param)
@@ -1974,18 +1930,12 @@ async def create_network(param: CreateNetworkParam) -> AsyncIterator[APNetwork]:
         )
     
     async with wlan.create_factory() as factory:
-        async with factory.create_ap(
-            param.phyname, param.ifname, param.ssid.hex(),
+        async with factory.create_monitor_ap(
+            param.phyname, param.ifname, param.ifname_active, param.ssid.hex(),
             param.channel, wlan_key, param.max_participants
         ) as access_point:
-            async with factory.create_monitor(
-                param.phyname_monitor, param.ifname_monitor
-            ) as monitor:
-                address = monitor.address()
-                async with factory.create_tap(param.ifname_tap, address) as tap:
-                    network = APNetwork(
-                        access_point, monitor, tap, param, key_derivation,
-                        wlan_key
-                    )
-                    async with network.start():
-                        yield network
+            address = access_point.address()
+            async with factory.create_tap(param.ifname_tap, address) as tap:
+                network = APNetwork(access_point, tap, param, key_derivation)
+                async with network.start():
+                    yield network
