@@ -1670,7 +1670,7 @@ class APNetwork:
         try:
             request.decode(challenge, challenge_key)
         except Exception:
-            logger.warning("Failed to parse authentication challenge")
+            logger.exception("Failed to parse authentication challenge")
             return None
         
         if request.token != self._network.challenge:
@@ -1740,6 +1740,11 @@ class APNetwork:
     async def _register_participant(
         self, address: MACAddress, name: bytes, app_version: int, platform: int
     ) -> None:
+        # Check if participant is already registered
+        for participant in self._network.participants:
+            if participant.connected and participant.mac_address == address:
+                return
+        
         # Allocate an ip address
         for index in range(8):
             if not self._network.participants[index].connected:
