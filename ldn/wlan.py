@@ -192,6 +192,9 @@ class MACAddress:
     def encode(self) -> bytes:
         """Returns a bytes representation of the MAC address."""
         return bytes(self._address)
+
+    def is_broadcast(self) -> bool:
+        return self == MACAddress("ff:ff:ff:ff:ff:ff")
     
     def _parse(self, text: str) -> list[int]:
         """Parses the given MAC address string."""
@@ -1340,7 +1343,8 @@ class MonitorAP:
         data.fromds = True
         if self._key:
             self._data_nonce += 1
-            data.encrypt(self._key, self._data_nonce, 1)
+            key_id = 1 if frame.target.is_broadcast() else 0
+            data.encrypt(self._key, self._data_nonce, key_id)
         
         await self.send_frame(data)
 
