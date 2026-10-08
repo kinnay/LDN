@@ -18,6 +18,13 @@ Because LDN operates at the data link layer, it requires low-level access to you
 
 It is important that no other software interferes with your network hardware. You probably need to stop the NetworkManager service before using this package: `sudo service NetworkManager stop`. Unfortunately, this means that you cannot access the internet while using the package. To restart the NetworkManager service, run `sudo service NetworkManager start`. If you are using a wired connection, you may be able to skip this step.
 
+### Required Hardware
+Some wireless drivers drop frames that are required by the LDN protocol. For example, the `iwlwifi` driver drops action frames after a network is joined, which makes it impossible to detect network changes, such as new participants or the IP address that is assigned by the host.
+
+According to experiments, MediaTek and Realtek drivers seem to work the best. This package is confirmed to work on the `mt7921e` driver.
+
+You can check which driver is being used by running `ethtool -i <interface name>`.
+
 ### Troubleshooting
 Using LDN is hard. Check out the list of [common issues](https://github.com/kinnay/LDN/wiki/Common-Issues). If your problem is still not solved, feel free to create an issue on github.
 
