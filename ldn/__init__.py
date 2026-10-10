@@ -1940,7 +1940,9 @@ async def create_network(param: CreateNetworkParam) -> AsyncGenerator[APNetwork]
             param.channel, wlan_key, param.max_participants
         ) as access_point:
             address = access_point.address()
-            async with factory.create_tap(param.ifname_tap, address) as tap:
+            async with factory.create_tap(
+                param.ifname_tap, address, mtu=1400
+            ) as tap:
                 network = APNetwork(access_point, tap, param, key_derivation)
                 async with network.start():
                     yield network

@@ -12,9 +12,9 @@ from Crypto.Cipher import AES
 
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
-
 from netlink import nl80211, route
 from ldn import streams, util, queue
+from typing import Any
 
 import contextlib
 import fcntl
@@ -404,6 +404,8 @@ class MACHeader:
 
 
 class FrameType(typing.Protocol):
+    sequence_id: int
+
     def decode(self, data: bytes) -> None:
         ...
     
@@ -1091,10 +1093,15 @@ class Interface:
             socket.AF_UNSPEC, 0, self._index, IFF_UP, IFF_UP, {}
         )
     
-    async def update_link(self, address: MACAddress) -> None:
-        attrs = {
-            route.IFLA_ADDRESS: address.encode()
-        }
+    async def update_link(
+        self, address: MACAddress | None = None, mtu: int | None = None
+    ) -> None:
+        attrs: dict[int, Any] = {}
+        if address is not None:
+            attrs[route.IFLA_ADDRESS] = address.encode()
+        if mtu is not None:
+            attrs[route.IFLA_MTU] = mtu
+        
         await self._router.update_link(
             socket.AF_UNSPEC, 0, self._index, 0, 0, attrs
         )
@@ -1879,7 +1886,7 @@ class Factory:
     
     @contextlib.asynccontextmanager
     async def create_tap(
-        self, ifname: str, address: MACAddress
+        self, ifname: str, address: MACAddress, mtu: int | None = None
     ) -> AsyncGenerator[Tap]:
         file = await trio.open_file("/dev/net/tun", "rb+", buffering=0)
         async with file:
@@ -1887,7 +1894,7 @@ class Factory:
             fcntl.ioctl(file.fileno(), TUNSETIFF, request)
 
             tap = Tap(self._wlan, self._router, ifname, address, file)
-            await tap.update_link(address)
+            await tap.update_link(address, mtu)
             await tap.up()
             yield tap
     
