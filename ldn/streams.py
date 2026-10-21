@@ -253,9 +253,14 @@ class StreamIn:
         """
         Returns num bytes from the input buffer and advances the current
         position.
+
+        Note: this routine should be fast, because it is used a lot, especially
+        in monitor mode.
         """
-        data = self.peek(num)
-        self.skip(num)
+        data = self._data[self._pos : self._pos + num]
+        if len(data) < num:
+            raise ParseError("Buffer overflow")
+        self._pos += num
         return data
         
     def readall(self) -> bytes:

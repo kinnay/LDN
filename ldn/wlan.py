@@ -1229,14 +1229,23 @@ class Monitor(Interface):
         """Sends a radiotap frame through the underlying interface."""
         await self._socket.send(frame.encode())
     
-    async def recv_frame(self) -> FrameType:
+    async def recv_frame(
+        self, *, mgmt_subtype_filter: list[int] | None = None
+    ) -> FrameType:
         """
         Waits until an IEEE 802.11 frame arrives, parses it and returns it.
+
+        The mgmt_subtype_filter can be used to improve performance by only
+        parsing specific types of frames. Experiments have shown that a
+        significant amount of time is spent parsing beacon frames, even though
+        these are not required in AP mode.
         """
         while True:
             radiotap = await self.recv()
             try:
-                frame = self._parse_frame(radiotap.data)
+                frame = self._parse_frame(
+                    radiotap.data, mgmt_subtype_filter=mgmt_subtype_filter
+                )
                 if frame is not None:
                     return frame
             except Exception as e:
@@ -1248,7 +1257,9 @@ class Monitor(Interface):
             radiotap = RadiotapFrame(frame.encode())
             await self.send(radiotap)
     
-    def _parse_frame(self, data: bytes) -> FrameType | None:
+    def _parse_frame(
+        self, data: bytes, *, mgmt_subtype_filter: list[int] | None = None
+    ) -> FrameType | None:
         """
         Parses an IEEE 802.11 frame and returns it. Raises an exception if the
         frame cannot be parsed.
@@ -1263,6 +1274,10 @@ class Monitor(Interface):
             return None
         
         if header.type == IEEE80211_FTYPE_MGMT:
+            if mgmt_subtype_filter is not None and \
+               header.subtype not in mgmt_subtype_filter:
+                return None
+            
             frame = FrameTypes[header.subtype]()
             frame.decode(data)
             return frame
@@ -1384,8 +1399,15 @@ class MonitorAP:
             await trio.sleep(.1)
 
     async def _receive_frames(self) -> None:
+        subtypes = [
+            IEEE80211_STYPE_ASSOC_REQ,
+            IEEE80211_STYPE_AUTH,
+            IEEE80211_STYPE_DEAUTH,
+            IEEE80211_STYPE_DISASSOC,
+            IEEE80211_STYPE_PROBE_REQ,
+        ]
         while True:
-            frame = await self._monitor.recv_frame()
+            frame = await self._monitor.recv_frame(mgmt_subtype_filter=subtypes)
             await self._process_frame(frame)
 
     async def _process_frame(self, frame: FrameType) -> None:
